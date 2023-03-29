@@ -3,8 +3,9 @@ import random
 import numpy as np
 from collections import deque
 from game import SnakeGameAI, Direction, Point
-from model import Linear_QNet, QTrainer
+from model import Linear_QNet, QTrainer, CNN_QNet
 from helper import plot
+import os
 
 MAX_MEMORY = 100_000
 BATCH_SIZE = 1000
@@ -18,11 +19,32 @@ class Agent:
         self.gamma = 0.9 # discount rate
         self.memory = deque(maxlen=MAX_MEMORY) # popleft()
         self.model = Linear_QNet(11, 256, 3)
+        #self.model = CNN_QNet(32*24 + 4, 256, 3)
         self.trainer = QTrainer(self.model, lr=LR, gamma=self.gamma)
 
+    # def get_state(self, game):
+    #     map = [[0 for i in range(0, 32)] for j in range(0, 24)]
 
+    #     if not game.game_over:
+    #         for m in game.snake:
+    #                 map[int(m.y//20)][int(m.x//20)] = 1
+
+    #     map[int(game.food.y//20)][int(game.food.x//20)] = 2
+
+    #     # dir_l = game.direction == Direction.LEFT
+    #     # dir_r = game.direction == Direction.RIGHT
+    #     # dir_u = game.direction == Direction.UP
+    #     # dir_d = game.direction == Direction.DOWN
+
+    #     # map.append(dir_l)
+    #     # map.append(dir_r)
+    #     # map.append(dir_u)
+    #     # map.append(dir_d)
+
+    #     return np.array(map, dtype=int)
     def get_state(self, game):
         head = game.snake[0]
+
         point_l = Point(head.x - 20, head.y)
         point_r = Point(head.x + 20, head.y)
         point_u = Point(head.x, head.y - 20)
@@ -51,7 +73,7 @@ class Agent:
             (dir_u and game.is_collision(point_l)) or 
             (dir_r and game.is_collision(point_u)) or 
             (dir_l and game.is_collision(point_d)),
-            
+
             # Move direction
             dir_l,
             dir_r,
@@ -62,7 +84,10 @@ class Agent:
             game.food.x < game.head.x,  # food left
             game.food.x > game.head.x,  # food right
             game.food.y < game.head.y,  # food up
-            game.food.y > game.head.y  # food down
+            game.food.y > game.head.y,  # food down
+
+            # snake length
+            # len(game.snake),
             ]
 
         return np.array(state, dtype=int)
@@ -86,7 +111,7 @@ class Agent:
 
     def get_action(self, state):
         # random moves: tradeoff exploration / exploitation
-        self.epsilon = 80 - self.n_games
+        self.epsilon = 60 - self.n_games
         final_move = [0,0,0]
         if random.randint(0, 200) < self.epsilon:
             move = random.randint(0, 2)
@@ -132,7 +157,7 @@ def train():
 
             if score > record:
                 record = score
-                agent.model.save()
+                # agent.model.save(n_games=agent.n_games, optimizer=agent.trainer.optimizer)
 
             print('Game', agent.n_games, 'Score', score, 'Record:', record)
 
