@@ -10,11 +10,11 @@ class CNN_QNet(nn.Module):
         self.conv1 = nn.Conv2d(in_channels=1, out_channels=8, kernel_size=(3,3), stride=(1,1), padding=(1,1))
         self.pool = nn.MaxPool2d(kernel_size=(2,2), stride=(2,2))
         self.conv2 = nn.Conv2d(in_channels=8, out_channels=16, kernel_size=(3,3), stride=(1,1), padding=(1,1))
-        self.linear = nn.Linear(256, 64)
-        self.linear2 = nn.Linear(4, 64)
-        self.linear3 = nn.Linear(64, output_size)
-        self.ln1 = nn.LayerNorm(64)
-        self.ln2 = nn.LayerNorm(64)
+        self.linear = nn.Linear(256, output_size)
+        # self.linear2 = nn.Linear(4, 64)
+        # self.linear3 = nn.Linear(64, output_size)
+        # self.ln1 = nn.LayerNorm(64)
+        # self.ln2 = nn.LayerNorm(64)
     def forward(self, x, d):
         s = x.shape
         x = F.relu(self.conv1(x))
@@ -22,8 +22,8 @@ class CNN_QNet(nn.Module):
         x = F.relu(self.conv2(x))
         x = self.pool(x)
         x = x.view(s[0], -1)
-        x = F.relu(self.ln1(self.linear(x)) + self.ln2(self.linear2(d)))
-        return self.linear3(x)
+        # x = F.relu(self.ln1(self.linear(x)) + self.ln2(self.linear2(d)))
+        return F.softmax(self.linear(x), 1)
 
     def save(self, file_name='model.pth', n_games=0, optimizer=None):
         model_folder_path = './model'

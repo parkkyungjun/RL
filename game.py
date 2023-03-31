@@ -36,6 +36,7 @@ class SnakeGameAI:
         pygame.display.set_caption('Snake')
         self.clock = pygame.time.Clock()
         self.n_games = 0
+        self.record = 0
         self.reset()
 
 
@@ -76,7 +77,7 @@ class SnakeGameAI:
         self._move(action) # update the head
         self.snake.insert(0, self.head)
         reward = 0
-        if self.n_games < 500:
+        if self.record < 10:
             if abs(self.food.x - self.head.x) + abs(self.food.y - self.head.y) <= self.distance:
                 reward = 5
                 self.distance = abs(self.food.x - self.head.x) + abs(self.food.y - self.head.y)

@@ -63,13 +63,14 @@ class Agent:
     def train_short_memory(self, state, action, reward, next_state, done, direction, direction_new):
         self.trainer.train_step(state, action, reward, next_state, done, direction, direction_new)
 
-    def get_action(self, state, direction):
+    def get_action(self, state, direction, record):
         # random moves: tradeoff exploration / exploitation
-        self.epsilon = 500 - self.n_games
+        self.epsilon = 250 # - self.n_games
         final_move = [0,0,0]
-        if random.randint(0, 2000) < self.epsilon:
-            move = random.randint(0, 2)
-            final_move[move] = 1
+        if record < 5:
+            if random.randint(0, 2000) < self.epsilon:
+                move = random.randint(0, 2)
+                final_move[move] = 1
         else:
             state0 = torch.tensor(state, dtype=torch.float)
             direction0 = torch.tensor(direction, dtype=torch.float)
@@ -96,7 +97,7 @@ def train():
         state_old, direction = agent.get_state(game)
 
         # get move
-        final_move = agent.get_action(state_old, direction)
+        final_move = agent.get_action(state_old, direction, record)
 
         # perform move and get new state
         reward, done, score = game.play_step(final_move)
@@ -116,6 +117,7 @@ def train():
 
             if score > record:
                 record = score
+                game.record = record
                 # agent.model.save(n_games=agent.n_games, optimizer=agent.trainer.optimizer)
 
             print('Game', agent.n_games, 'Score', score, 'Record:', record)
