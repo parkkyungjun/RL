@@ -28,7 +28,7 @@ SPEED = 80
 
 class SnakeGameAI:
 
-    def __init__(self, w=640, h=480):
+    def __init__(self, w=320, h=320):
         self.w = w
         self.h = h
         # init display
@@ -76,13 +76,13 @@ class SnakeGameAI:
         self._move(action) # update the head
         self.snake.insert(0, self.head)
         reward = 0
-        if self.n_games < 200:
+        if self.n_games < 500:
             if abs(self.food.x - self.head.x) + abs(self.food.y - self.head.y) <= self.distance:
-                reward = 3
+                reward = 5
                 self.distance = abs(self.food.x - self.head.x) + abs(self.food.y - self.head.y)
             else:
                 self.distance = abs(self.food.x - self.head.x) + abs(self.food.y - self.head.y)
-                reward = -3
+                reward = -5
 
         # 3. check if game over
         # self.game_over = False
@@ -99,7 +99,6 @@ class SnakeGameAI:
             self._place_food()
         else:
             self.snake.pop()
-
 
         # 5. update ui and clock
         self._update_ui()
