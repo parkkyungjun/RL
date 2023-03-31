@@ -19,29 +19,8 @@ class Agent:
         self.gamma = 0.9 # discount rate
         self.memory = deque(maxlen=MAX_MEMORY) # popleft()
         self.model = Linear_QNet(11, 256, 3)
-        #self.model = CNN_QNet(32*24 + 4, 256, 3)
         self.trainer = QTrainer(self.model, lr=LR, gamma=self.gamma)
 
-    # def get_state(self, game):
-    #     map = [[0 for i in range(0, 32)] for j in range(0, 24)]
-
-    #     if not game.game_over:
-    #         for m in game.snake:
-    #                 map[int(m.y//20)][int(m.x//20)] = 1
-
-    #     map[int(game.food.y//20)][int(game.food.x//20)] = 2
-
-    #     # dir_l = game.direction == Direction.LEFT
-    #     # dir_r = game.direction == Direction.RIGHT
-    #     # dir_u = game.direction == Direction.UP
-    #     # dir_d = game.direction == Direction.DOWN
-
-    #     # map.append(dir_l)
-    #     # map.append(dir_r)
-    #     # map.append(dir_u)
-    #     # map.append(dir_d)
-
-    #     return np.array(map, dtype=int)
     def get_state(self, game):
         head = game.snake[0]
 
