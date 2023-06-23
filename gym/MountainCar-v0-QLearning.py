@@ -10,7 +10,7 @@ env.reset()
 def QLearning(env, learning, discount, epsilon, min_eps, episodes):
     # Determine size of discretized state space
     num_states = (env.observation_space.high - env.observation_space.low)*\
-                    np.array([10, 50])
+                    np.array([10, 100])
     num_states = np.round(num_states, 0).astype(int) + 1
 
     # Initialize Q table
@@ -35,7 +35,7 @@ def QLearning(env, learning, discount, epsilon, min_eps, episodes):
         state = env.reset()
 
         # Discretize state
-        state_adj = (state - env.observation_space.low)*np.array([10, 50])
+        state_adj = (state - env.observation_space.low)*np.array([10, 100])
         state_adj = np.round(state_adj, 0).astype(int)
         
         while done != True:
@@ -54,7 +54,7 @@ def QLearning(env, learning, discount, epsilon, min_eps, episodes):
             
             reward = newreward(state2[0])
             # Discretize state2
-            state2_adj = (state2 - env.observation_space.low)*np.array([10, 50])
+            state2_adj = (state2 - env.observation_space.low)*np.array([10, 100])
             state2_adj = np.round(state2_adj, 0).astype(int)
 
             #Allow for terminal states
