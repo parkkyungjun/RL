@@ -1,6 +1,5 @@
 import numpy as np
 import gym # 0.25.2
-import matplotlib.pyplot as plt
 
 # Import and initialize Mountain Car Environment
 env = gym.make('MountainCar-v0')
