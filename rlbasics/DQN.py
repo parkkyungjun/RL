@@ -81,11 +81,11 @@ def main():
     q_target.load_state_dict(q.state_dict())
     memory = ReplayBuffer()
 
-    print_interval = 20
+    print_interval = 100
     score = 0.0  
     optimizer = optim.Adam(q.parameters(), lr=learning_rate)
 
-    for n_epi in range(10000):
+    for n_epi in range(1000):
         epsilon = max(0.01, 0.08 - 0.01*(n_epi/200)) #Linear annealing from 8% to 1%
         s = env.reset()
         done = False
@@ -98,8 +98,6 @@ def main():
             s = s_prime
 
             score += r
-            if done:
-                break
             
         if memory.size()>2000:
             train(q, q_target, memory, optimizer)
@@ -111,5 +109,17 @@ def main():
             score = 0.0
     env.close()
 
+    env = gym.make('CartPole-v1', render_mode="human")
+    for i in range(5):
+        done, score = False, 0
+        s = env.reset()
+        while not done:
+            a = q.sample_action(torch.from_numpy(s).float(), epsilon)      
+            s_prime, r, done, truncated = env.step(a)
+
+            s = s_prime
+            score += r
+            env.render()
+        print(score)
 if __name__ == '__main__':
     main()
