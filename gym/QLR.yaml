@@ -56,12 +56,12 @@ environments:
     demo_episodes: 2
   
   Blackjack-v1:
-      num_episodes: 10000
-      alpha: 0.01
+      num_episodes: 100000
+      alpha: 0.001
       gamma: 0.95
       epsilon: 1.0
       epsilon_min: 0.1
-      epsilon_decay: 0.0002
+      epsilon_decay: 0.00002
       max_steps_per_episode: inf
       render_fps: 20
       demo_episodes: 10

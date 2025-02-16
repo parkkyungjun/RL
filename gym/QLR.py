@@ -71,16 +71,12 @@ def train_q_learning(
 
                 next_state = (next_state - env.observation_space.low)*np.array([10, 100])
                 next_state = tuple(np.round(next_state, 0).astype(int))
-
-                epsilon *= epsilon_decay
         
                 if done and next_state[0] >= 0.5:
                     Q[state + (action,)] = reward
                 else:
                     delta = alpha*(reward + np.max(Q[next_state]) - Q[state + (action,)])
                     Q[state + (action,)] += delta
-            else:
-                epsilon = max(epsilon - epsilon_decay, epsilon_min)
 
             if env_id != 'MountainCar-v0':
                 if done or truncated:
@@ -88,12 +84,20 @@ def train_q_learning(
                 else:
                     td_target = reward + gamma * np.max(Q[next_state])
 
-                Q[state, action] += alpha * (td_target - Q[state, action])
+                if env_id == 'Blackjack-v1':
+                    Q[state + (action,)] += alpha * (td_target - Q[state + (action,)])
+                else:
+                    Q[state, action] += alpha * (td_target - Q[state, action])
 
             state = next_state
 
             if done or truncated:
                 break
+        
+        if epsilon_decay > 0.5:
+            epsilon *= epsilon_decay
+        else:
+            epsilon = max(epsilon - epsilon_decay, epsilon_min)
 
         rewards.append(reward)
         
@@ -138,7 +142,7 @@ def train_q_learning(
     os.makedirs(env_id, exist_ok=True)
     imageio.mimsave(os.path.join(env_id, env_id + '.mp4'), frames, fps=render_fps)
 
-    imageio.mimsave(os.path.join(env_id, env_id + '.gif'), frames, fps=render_fps)
+    imageio.mimsave(os.path.join(env_id, env_id + '.gif'), frames, fps=render_fps, loop=0)
     print(f"[{env_id}] 학습 완료! {demo_episodes} 에피소드 시연 영상을 '{env_id + 'mp4'}'로 저장했습니다.")
 
     return Q
