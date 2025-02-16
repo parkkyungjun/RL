@@ -1,0 +1,25 @@
+env_id: "Pendulum-v1"
+
+# Discretize actions (토크) - 이 값을 바꿔볼 수 있음
+discrete_actions: [-2.0, -1.0, -0.1, 0.0, 0.1, 1.0, 2.0]
+
+# 학습 관련 하이퍼파라미터
+episodes: 100
+max_steps_per_episode: 200
+batch_size: 64
+gamma: 0.97
+
+# 탐욕 탐색(Epsilon-greedy) 파라미터
+epsilon_start: 1.0
+epsilon_end: 0
+epsilon_decay: 0.95
+
+# 학습률, 타겟 네트워크 업데이트 주기
+learning_rate: 0.001
+target_update_frequency: 10
+
+# 리플레이 버퍼 크기
+replay_buffer_size: 20000
+
+# 녹화할 스텝 수 (플레이 시)
+record_steps: 400
