@@ -4,4 +4,6 @@
 
 <img width="27%" src="https://github.com/parkkyungjun/RL/blob/main/pendulum/pendulum.gif?raw=true"> <img width="33.5%" src="https://github.com/parkkyungjun/RL/blob/main/snake_ai/result/SnakeAI.gif?raw=true"> <img width="25%" src="https://github.com/parkkyungjun/RL/blob/main/gym/FrozenLake8x8-v1/FrozenLake8x8-v1.gif">
 
+<img width="27%" src="https://github.com/parkkyungjun/RL/blob/main/gym/Pendulum-v1/Pendulum-v1.gif">
+
 
