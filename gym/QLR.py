@@ -61,6 +61,13 @@ def train_q_learning(
             action = epsilon_greedy_action(state, Q, epsilon)
             next_state, reward, done, truncated, info = env.step(action)
 
+            if env_id == 'FrozenLake8x8-v1':
+                reward -= 1
+                if done and reward == -1:
+                    reward = -500
+                if reward == 0:
+                    reward = 10
+            
             if env_id == 'Blackjack-v1':
                 next_state = (next_state[0], next_state[1], int(next_state[2]))
             elif env_id == 'MountainCar-v0':
@@ -143,28 +150,21 @@ def train_q_learning(
     imageio.mimsave(os.path.join(env_id, env_id + '.mp4'), frames, fps=render_fps)
 
     imageio.mimsave(os.path.join(env_id, env_id + '.gif'), frames, fps=render_fps, loop=0)
-    print(f"[{env_id}] 학습 완료! {demo_episodes} 에피소드 시연 영상을 '{env_id + 'mp4'}'로 저장했습니다.")
+    print(f"[{env_id}] 학습 완료! {demo_episodes} 에피소드 시연 영상을 '{env_id + '.mp4'}'로 저장했습니다.")
 
     return Q
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env", type=str, default="Taxi-v3", help="학습할 Gym 환경 ID")
-    parser.add_argument("--config", type=str, default="QLR.yaml", help="하이퍼파라미터가 정리된 YAML 파일 경로")
+    parser.add_argument("--env", type=str, default="Taxi-v3")
+    parser.add_argument("--config", type=str, default="QLR.yaml")
     args = parser.parse_args()
-
-    # UTF-8 인코딩으로 YAML 파일 로딩
+    
     with open(args.config, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
-
-    # environments 섹션에서 해당 env ID를 찾기
+    
     env_params = config["environments"].get(args.env)
-    if env_params is None:
-        raise ValueError(
-            f"지정한 env [{args.env}]가 {args.config} 내에 없습니다. "
-            f"가능한 환경: {list(config['environments'].keys())}"
-        )
     
     num_episodes = env_params["num_episodes"]
     alpha = env_params["alpha"]
