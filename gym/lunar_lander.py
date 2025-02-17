@@ -83,7 +83,7 @@ def main():
         if done or truncated:
             obs, info = env.reset()
 
-    num_episodes = 1000
+    num_episodes = 720
     for episode in range(num_episodes):
         obs, info = env.reset()
         done = False
@@ -145,7 +145,7 @@ def main():
         state_tensor = torch.FloatTensor(obs).unsqueeze(0).to(device)
 
         with torch.no_grad():
-            action_idx = q_network(state_tensor).argmax().item().to('cpu')
+            action_idx = q_network(state_tensor).argmax().item()
 
         action_value = discrete_actions[action_idx]
         next_obs, reward, done, truncated, info = test_env.step(action_value)
