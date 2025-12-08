@@ -1,0 +1,9 @@
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+torch==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1
+gymnasium==1.2.2
+tqdm
+lightzero==0.2.0
+di-engine==0.5.3
