@@ -82,12 +82,12 @@ def train():
             # next_s shape: (8, 4), reward shape: (8,)
             next_s, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
             
-            x_pos = next_s[:, 0]
-            theta_dot = next_s[:, 3]
-            dynamic_bonus = np.abs(theta_dot)
+            # x_pos = next_s[:, 0]
+            # theta_dot = next_s[:, 3]
+            # dynamic_bonus = np.abs(theta_dot)
             
-            dist_penalty = np.abs(x_pos) / 2.4
-            reward = reward - dist_penalty + dynamic_bonus
+            # dist_penalty = np.abs(x_pos) / 2.4
+            reward = reward# - dist_penalty + dynamic_bonus
             # 3. 데이터 저장
             log_prob = dist.log_prob(action)
             entropy = dist.entropy()
