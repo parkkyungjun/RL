@@ -85,13 +85,15 @@ public:
             for (int h = 0; h < BOARD_SIZE; ++h)
                 for (int w = 0; w < BOARD_SIZE; ++w)
                     ptr(c, h, w) = 0.0f;
-
+        
+        float turn_info = (current_player == 1) ? 1.0f : 0.0f;
         for (int i = 0; i < BOARD_AREA; ++i) {
             int r = i / BOARD_SIZE;
             int c = i % BOARD_SIZE;
             if (board[i] == current_player) ptr(0, r, c) = 1.0f;
             else if (board[i] == -current_player) ptr(1, r, c) = 1.0f;
-            ptr(2, r, c) = 1.0f; // Turn info (always 1 for current player perspective)
+            // ptr(2, r, c) = 1.0f; // Turn info (always 1 for current player perspective)
+            ptr(2, r, c) = turn_info;
         }
         return result;
     }
@@ -212,9 +214,9 @@ public:
             // 이동 후 승패 체크
             auto result = scratch_game.check_win(current_node->action);
             if (result.first) {
-                // 게임 끝남 (Value = 1.0 for current player)
-                backpropagate_value(1.0f); 
-                return py::none(); // 추론 불필요
+                float val = (result.second == 0) ? 0.0f : -1.0f;
+                backpropagate_value(val);
+                return py::none();
             }
         }
 

@@ -14,7 +14,7 @@ import mcts_core
 BOARD_SIZE = 15
 NUM_RES_BLOCKS = 5      
 NUM_CHANNELS = 64
-MODEL_PATH = "models/model_5342000.pth"  # ✅ 불러올 모델 경로 수정하세요
+MODEL_PATH = "models/model_380000.pth"  # ✅ 불러올 모델 경로 수정하세요
 NUM_MCTS_SIMS = 800  # 생각하는 횟수 (높을수록 잘하지만 느려짐)
 
 # =============================================================================
@@ -132,7 +132,7 @@ def main():
             
     turn = 1 # 1=흑, -1=백
     game_over = False
-
+    color = {-1: "백", 1: "흑"}
     print_board(local_board)
 
     while not game_over:
@@ -150,12 +150,13 @@ def main():
                 
             # C++ 엔진에 착수 업데이트
             # update_root_game은 해당 수가 승리수인지(게임종료) 반환한다고 가정
-            is_end = mcts.update_root_game(action)
+            mcts.update_root_game(action)
+            is_game_over, winner = mcts.check_game_status()
             local_board[r][c] = turn
             print_board(local_board)
             
-            if is_end:
-                print("🎉 당신이 이겼습니다! (믿기지 않네요)")
+            if is_game_over:
+                print(f"🎉 {color[winner]}이 이겼습니다! (믿기지 않네요)")
                 break
             
         # ---------------------------------------------------------

@@ -1,3 +1,7 @@
+# cpp_run.py
+# =============================================================================
+# AlphaZero Omok (Gomoku) - C++ MCTS 엔진 + Python GPU 추론 통합 구현
+# =============================================================================
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -70,6 +74,7 @@ class AlphaZeroNet(nn.Module):
 # =============================================================================
 # [3] Inference Server
 # =============================================================================
+
 @ray.remote(num_gpus=0.4) # GPU 메모리 점유율 조정
 class InferenceServer:
     def __init__(self):
@@ -83,6 +88,7 @@ class InferenceServer:
         self.model.load_state_dict(weights)
 
     async def predict(self, state_numpy):
+        # state_numpy shape: (N, 3, 15, 15) where N <= 8
         future = self.loop.create_future()
         await self.queue.put((state_numpy, future))
         return await future
@@ -92,39 +98,58 @@ class InferenceServer:
             batch_inputs = []
             futures = []
             
-            # 첫 번째 요청 대기
+            # 1. 첫 번째 요청 대기
             item = await self.queue.get()
-            batch_inputs.append(item[0])
+            batch_inputs.append(item[0]) # item[0] is (N, 3, 15, 15)
             futures.append(item[1])
             
-            # 배치 모으기 (최대 3ms 대기)
+            # 2. 배치 모으기 (최대 3ms 대기)
             deadline = self.loop.time() + 0.003
-            while len(batch_inputs) < INFERENCE_BATCH_SIZE:
+            
+            # 현재까지 모인 총 샘플 수 계산 (Max Batch Size 초과 방지용)
+            current_batch_size = item[0].shape[0]
+            
+            while True:
                 timeout = deadline - self.loop.time()
                 if timeout <= 0: break
+                if current_batch_size >= INFERENCE_BATCH_SIZE: break # 배치 꽉 차면 중단
+                
                 try:
                     item = await asyncio.wait_for(self.queue.get(), timeout=timeout)
                     batch_inputs.append(item[0])
                     futures.append(item[1])
+                    current_batch_size += item[0].shape[0]
                 except asyncio.TimeoutError:
                     break
             
             if batch_inputs:
                 with torch.no_grad():
-                    # C++에서 넘어온 numpy array를 텐서로 변환
-                    states = torch.tensor(np.array(batch_inputs), dtype=torch.float32).to(INFERENCE_DEVICE)
+                    # [수정 핵심] np.stack 대신 np.concatenate 사용!
+                    # List of (N, 3, 15, 15) -> (Total_N, 3, 15, 15)
+                    states_np = np.concatenate(batch_inputs, axis=0)
+                    
+                    states = torch.tensor(states_np, dtype=torch.float32).to(INFERENCE_DEVICE)
                     
                     # 추론
                     pi_logits, values = self.model(states)
                     
-                    # Policy: LogSoftmax -> Exp(Prob) 변환해서 C++로 전달
                     probs = torch.exp(pi_logits).cpu().numpy()
                     vals = values.cpu().numpy()
                 
+                # 3. 결과 분배 (Slicing back to workers)
+                cursor = 0
                 for i, future in enumerate(futures):
                     if not future.done():
-                        future.set_result((probs[i], vals[i]))
-
+                        # 이 워커가 보냈던 샘플 개수 확인
+                        num_samples = batch_inputs[i].shape[0]
+                        
+                        # 결과 배열에서 해당 범위만큼 잘라서 전달
+                        p_batch = probs[cursor : cursor + num_samples]
+                        v_batch = vals[cursor : cursor + num_samples]
+                        
+                        future.set_result((p_batch, v_batch))
+                        cursor += num_samples
+                        
 # =============================================================================
 # [4] Worker (C++ MCTS 탑재)
 # =============================================================================
@@ -133,10 +158,24 @@ class DataWorker:
     def __init__(self, buffer_ref, inference_server):
         self.buffer_ref = buffer_ref
         self.inference_server = inference_server
-        # 여기서 C++ 모듈의 MCTS 클래스 생성
-        self.mcts = mcts_core.MCTS()
+        
+        # [핵심] 한 워커가 동시에 관리할 게임 개수 (CPU 코어당 1개지만, 논리적 게임은 여러 개)
+        self.num_parallel_games = 8  
+        self.mcts_envs = [mcts_core.MCTS() for _ in range(self.num_parallel_games)]
+        
+        # 각 게임별 상태 저장소
+        self.histories = [[] for _ in range(self.num_parallel_games)]
+        self.sim_counts = [0] * self.num_parallel_games
+        self.step_counts = [0] * self.num_parallel_games
+        
+        # 초기화
+        for mcts in self.mcts_envs:
+            mcts.reset()
+            # 노이즈 미리 추가 (새 게임 시작 시)
+            mcts.add_root_noise(0.3, 0.25)
 
     def get_equi_data(self, history):
+        # (기존과 동일)
         extend_data = []
         for state, pi, z in history:
             pi_board = pi.reshape(BOARD_SIZE, BOARD_SIZE)
@@ -150,66 +189,99 @@ class DataWorker:
         return extend_data
 
     def run(self):
+        # 무한 루프
         while True:
-            self.mcts.reset()
-            history = [] # [(state, pi, player_turn), ...]
-            step_count = 0
+            # ==========================================
+            # 1. 배치 수집 (Batch Collection)
+            # ==========================================
+            states_to_infer = []
+            indices_to_infer = []
             
-            while True:
-                # 1. 시뮬레이션 (800회) - C++ 내부에서 트리 관리
-                self.mcts.add_root_noise(0.3, 0.25)
+            for i in range(self.num_parallel_games):
+                TARGET_SIMS = 200 
                 
-                for _ in range(800): 
-                    # A. C++이 Leaf 노드 선택
-                    leaf_state = self.mcts.select_leaf()
+                if self.sim_counts[i] < TARGET_SIMS:
+                    leaf = self.mcts_envs[i].select_leaf()
                     
-                    # None이면 해당 시뮬레이션 경로는 이미 게임이 끝난 노드
-                    if leaf_state is None:
-                        continue
-                        
-                    # B. Python이 GPU 추론
-                    policy, value = ray.get(self.inference_server.predict.remote(leaf_state))
-                    
-                    # C. C++로 결과 주입
-                    self.mcts.backpropagate(policy, value.item())
+                    if leaf is not None:
+                        # 추론 필요 -> 배치에 추가
+                        states_to_infer.append(leaf)
+                        indices_to_infer.append(i)
+                    else:
+                        # [중요 수정] 게임이 끝난 노드도 시뮬레이션 1회로 쳐야 함!
+                        # C++ 내부적으로 이미 backpropagate_value를 수행했으므로 카운트만 올리면 됨
+                        self.sim_counts[i] += 1
+            
+            # ==========================================
+            # 2. GPU 추론 (Batch Inference)
+            # ==========================================
+            if states_to_infer:
+                # 여러 게임의 상태를 묶어서 한 번에 요청 (Blocking)
+                # 대기하는 동안 다른 연산은 없지만, 한 번 갔다 오면 N개 게임이 동시에 진행됨
+                states_np = np.stack(states_to_infer)
+                policy_batch, value_batch = ray.get(self.inference_server.predict.remote(states_np))
                 
-                # 2. 행동 선택
-                temp = 1.0 if step_count < 30 else 0.1
-                state, pi = self.mcts.get_action_probs(temp)
-                
-                # 현재 누구 턴이었는지 저장 (나중에 z값 계산용)
-                current_player = self.mcts.get_current_player()
-                history.append([state, pi, current_player])
-                
-                # 실제 수 두기 & 루트 이동
-                action = np.random.choice(len(pi), p=pi)
-                
-                # update_root_game이 True를 반환하면 방금 둔 수로 게임이 끝났다는 뜻
-                self.mcts.update_root_game(action)
-                is_game_over, winner = self.mcts.check_game_status()
-                step_count += 1
-                
-                if is_game_over or step_count >= BOARD_SIZE * BOARD_SIZE:
-                    if step_count >= BOARD_SIZE * BOARD_SIZE:
-                        winner = -1
-                    
-                    # z값(승패) 할당
-                    # history에 저장된 current_player와 winner가 같으면 +1, 다르면 -1
-                    processed_history = []
-                    for h_state, h_pi, h_player in history:
-                        if winner == 0:
-                            z = 0
-                        elif h_player == winner:
-                            z = 1
-                        else:
-                            z = -1
-                        processed_history.append([h_state, h_pi, z])
-                    
-                    # 데이터 증강 (8배)
-                    augmented_data = self.get_equi_data(processed_history)
-                    ray.get(self.buffer_ref.add.remote(augmented_data))
-                    break
+                # ==========================================
+                # 3. 결과 반영 (Backpropagation)
+                # ==========================================
+                for idx, policy, value in zip(indices_to_infer, policy_batch, value_batch):
+                    self.mcts_envs[idx].backpropagate(policy, value.item())
+                    self.sim_counts[idx] += 1
 
+            # ==========================================
+            # 4. 행동 선택 (Make Move)
+            # ==========================================
+            for i in range(self.num_parallel_games):
+                TARGET_SIMS = 200
+                
+                # 시뮬레이션 목표 달성 시 실제 착수
+                if self.sim_counts[i] >= TARGET_SIMS:
+                    mcts = self.mcts_envs[i]
+                    
+                    # Temperature 적용
+                    temp = 1.0 if self.step_counts[i] < 30 else 0.1
+                    state, pi = mcts.get_action_probs(temp)
+                    
+                    # 기록 저장
+                    current_player = mcts.get_current_player()
+                    self.histories[i].append([state, pi, current_player])
+                    
+                    # 행동 선택
+                    action = np.random.choice(len(pi), p=pi)
+                    mcts.update_root_game(action)
+                    self.step_counts[i] += 1
+                    
+                    # 시뮬레이션 카운트 리셋 & 루트 노이즈 추가
+                    self.sim_counts[i] = 0
+                    mcts.add_root_noise(0.3, 0.25)
+                    
+                    # 게임 종료 확인
+                    is_game_over, winner = mcts.check_game_status()
+                    
+                    if is_game_over or self.step_counts[i] >= BOARD_SIZE * BOARD_SIZE:
+                        # 무승부 처리 (Winner가 0이면 Draw)
+                        # Z값 계산
+                        processed_history = []
+                        for h_state, h_pi, h_player in self.histories[i]:
+                            if winner == 0:
+                                z = 0.0
+                            elif h_player == winner:
+                                z = 1.0
+                            else:
+                                z = -1.0
+                            processed_history.append([h_state, h_pi, z])
+                        
+                        # 버퍼 전송
+                        augmented = self.get_equi_data(processed_history)
+                        self.buffer_ref.add.remote(augmented)
+                        
+                        # 해당 게임 슬롯 리셋
+                        mcts.reset()
+                        mcts.add_root_noise(0.3, 0.25)
+                        self.histories[i] = []
+                        self.step_counts[i] = 0
+                        self.sim_counts[i] = 0
+                        
 # =============================================================================
 # [5] 학습 루프 (Main)
 # =============================================================================
