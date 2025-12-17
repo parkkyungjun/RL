@@ -15,10 +15,10 @@ import mcts_core
 BOARD_SIZE = 15
 NUM_RES_BLOCKS = 5      
 NUM_CHANNELS = 64
-MODEL_PATH = "models/model_20000.pth" # ✅ 관전하고 싶은 모델 경로
+MODEL_PATH = "models/checkpoint_20000.pth" # ✅ 관전하고 싶은 모델 경로
 NUM_MCTS_SIMS = 800     # 생각하는 횟수
 WATCH_DELAY = 1.0       # 한 수 둘 때마다 1초씩 멈춤 (관전용)
-TEMPERATURE = 0.5       # 0.0: 정수(Best)만 둠 / 1.0: 약간 다양하게 둠 (관전 꿀잼용)
+TEMPERATURE = 0       # 0.0: 정수(Best)만 둠 / 1.0: 약간 다양하게 둠 (관전 꿀잼용)
 
 # =============================================================================
 # [2] 신경망 (동일)
@@ -90,7 +90,7 @@ def main():
     # 모델 로드
     model = AlphaZeroNet().to(device)
     if os.path.exists(MODEL_PATH):
-        model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+        model.load_state_dict(torch.load(MODEL_PATH, map_location=device)['model_state_dict'])
         print(f"✅ 모델 로드 완료: {MODEL_PATH}")
     else:
         print(f"❌ 모델 파일을 찾을 수 없습니다: {MODEL_PATH}")
@@ -138,8 +138,8 @@ def main():
 
         # 2. 착수 선택
         # TEMPERATURE가 0이면 가장 승률 높은 수, 높으면 확률적으로 둠
-        temp = TEMPERATURE if move_count < 20 else 0.1 # 초반엔 다양하게, 후반엔 진지하게
-        _, pi = mcts.get_action_probs(temp) 
+        temp = 0
+        _, pi = mcts.get_action_probs(TEMPERATURE) 
         
         if np.isnan(pi).any():
             print("⚠️ NaN detected in policy, falling back to argmax")

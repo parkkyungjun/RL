@@ -20,14 +20,14 @@ import mcts_core
 BOARD_SIZE = 15
 NUM_RES_BLOCKS = 5      
 NUM_CHANNELS = 64       
-BATCH_SIZE = 1024        
+BATCH_SIZE = 2048        
 INFERENCE_BATCH_SIZE = 2048
 LR = 0.001
-BUFFER_SIZE = 200000    
-NUM_ACTORS = 20         
+BUFFER_SIZE = 1000000    
+NUM_ACTORS = 10         
 SAVE_INTERVAL = 20000
-TARGET_SIMS = 50
-RESUME_CHECKPOINT = None 
+TARGET_SIMS = 200
+RESUME_CHECKPOINT = 'models/checkpoint_20000.pth' 
 
 # 합성 데이터 설정 (사용자 아이디어)
 SYNTHETIC_GAMES = 2000  # 초기에 주입할 판 수 (흑승 1000 + 백승 1000)
@@ -406,7 +406,6 @@ if __name__ == "__main__":
     scaler = torch.amp.GradScaler('cuda')
     
     step = 0
-    RESUME_CHECKPOINT = None 
 
     # =================================================================
     # [LOGIC] Resume vs Fresh Start
@@ -443,7 +442,7 @@ if __name__ == "__main__":
 
         # [STEP 1.5] Pre-training
         print(f"🧠 Pre-training on Synthetic Data...")
-        pretrain_steps = initial_buffer_size // BATCH_SIZE
+        pretrain_steps = (initial_buffer_size // BATCH_SIZE)*10
         
         model.train()
         for i in range(pretrain_steps):
@@ -487,9 +486,10 @@ if __name__ == "__main__":
     last_log_total_added = last_total_added
     last_log_step = step
     
-    TARGET_REPLAY_RATIO = 1.0 
-    MAX_STEPS_PER_CYCLE = 50 
+    TARGET_REPLAY_RATIO = 10.0 
+    MAX_STEPS_PER_CYCLE = 1000 
 
+    loss_history = {'step': [], 'total': [], 'pi': [], 'v': []}
     while True:
         current_total_added = ray.get(buffer.get_total_added.remote())
         new_data_count = current_total_added - last_total_added
@@ -501,6 +501,9 @@ if __name__ == "__main__":
         needed_steps = int((new_data_count / BATCH_SIZE) * TARGET_REPLAY_RATIO)
         steps_to_run = max(1, min(needed_steps, MAX_STEPS_PER_CYCLE))
 
+        # =================================================================
+        # 학습 루프 (Training Loop)
+        # =================================================================
         for _ in range(steps_to_run):
             s_batch, pi_batch, z_batch = ray.get(buffer.sample.remote(BATCH_SIZE))
             
@@ -510,7 +513,6 @@ if __name__ == "__main__":
             
             optimizer.zero_grad()
             
-            # [AMP 수정 2] 최신 문법 적용 (autocast('cuda'))
             with torch.amp.autocast('cuda'):
                 pred_pi, pred_v = model(s_tensor)
                 loss_pi = -torch.mean(torch.sum(pi_tensor * pred_pi, dim=1))
@@ -523,36 +525,51 @@ if __name__ == "__main__":
             
             step += 1
             
+            # [가중치 업데이트]
             if step % 50 == 0:
                 cpu_weights = {k: v.cpu() for k, v in model.state_dict().items()}
                 inference_server.update_weights.remote(cpu_weights)
 
-        consumed_data_equivalent = int((steps_to_run * BATCH_SIZE) / TARGET_REPLAY_RATIO)
-        last_total_added += consumed_data_equivalent
-        if last_total_added > current_total_added: last_total_added = current_total_added
-
+            # [핵심 수정] 저장 체크를 for문 안에서 매 스텝마다 해야 함!
+            if step % SAVE_INTERVAL == 0:
+                if not os.path.exists("models"): os.makedirs("models")
+                
+                checkpoint = {
+                    'step': step,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scaler_state_dict': scaler.state_dict()
+                }
+                save_path = f"models/checkpoint_{step}.pth"
+                torch.save(checkpoint, save_path)
+                print(f"\n💾 Checkpoint Saved: {save_path}")
+                
+                plt.figure(figsize=(12, 5))
+                plt.subplot(1, 2, 1)
+                plt.plot(loss_history['step'], loss_history['total'], label='Total')
+                plt.plot(loss_history['step'], loss_history['pi'], label='Policy')
+                plt.legend(); plt.grid(True)
+                plt.subplot(1, 2, 2)
+                plt.plot(loss_history['step'], loss_history['v'], label='Value', color='orange')
+                plt.legend(); plt.grid(True)
+                plt.savefig('training_loss.png')
+                plt.close()
+        # =================================================================
+        # 루프 종료 후 동기화 및 로그 출력
+        # =================================================================
+        last_total_added = current_total_added # 포인터 최신화
+        
         if step % 50 == 0 or steps_to_run > 100:
-            log_new_data = current_total_added - last_log_total_added
-            if log_new_data == 0: log_new_data = 1
-            
             trained_since_last_log = step - last_log_step
+            current_buffer_size = ray.get(buffer.size.remote())
             
             print(f"[Step {step}] Loss: {total_loss.item():.4f} | "
-                  f"Added: +{log_new_data} / Trained: {trained_since_last_log} steps | "
-                  f"Buf: {ray.get(buffer.size.remote())}")
+                  f"New Data: +{new_data_count} / Trained: {trained_since_last_log} steps | "
+                  f"Buf: {current_buffer_size}")
             
-            last_log_total_added = current_total_added
             last_log_step = step
-
-        if step % SAVE_INTERVAL == 0:
-            if not os.path.exists("models"): os.makedirs("models")
             
-            checkpoint = {
-                'step': step,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scaler_state_dict': scaler.state_dict()
-            }
-            save_path = f"models/checkpoint_{step}.pth"
-            torch.save(checkpoint, save_path)
-            print(f"💾 Checkpoint Saved: {save_path}")
+            loss_history['step'].append(step)
+            loss_history['total'].append(total_loss.item())
+            loss_history['pi'].append(loss_pi.item())
+            loss_history['v'].append(loss_v.item())
