@@ -10,7 +10,7 @@ import asyncio
 from collections import deque
 import random
 import matplotlib.pyplot as plt
-
+import sys
 # C++ 모듈 (필요시 주석 처리하고 테스트 가능, 여기선 MCTS Worker에서 사용)
 import mcts_core 
 
@@ -18,19 +18,16 @@ import mcts_core
 # [1] 설정
 # =============================================================================
 BOARD_SIZE = 15
-NUM_RES_BLOCKS = 5      
-NUM_CHANNELS = 64       
-BATCH_SIZE = 2048        
+NUM_RES_BLOCKS = 5
+NUM_CHANNELS = 64
+BATCH_SIZE = 1024
 INFERENCE_BATCH_SIZE = 2048
-LR = 0.001
-BUFFER_SIZE = 1000000    
-NUM_ACTORS = 10         
-SAVE_INTERVAL = 20000
-TARGET_SIMS = 200
-RESUME_CHECKPOINT = 'models/checkpoint_20000.pth' 
-
-# 합성 데이터 설정 (사용자 아이디어)
-SYNTHETIC_GAMES = 2000  # 초기에 주입할 판 수 (흑승 1000 + 백승 1000)
+LR = 0.002
+BUFFER_SIZE = 200000
+NUM_ACTORS = 8
+SAVE_INTERVAL = 2000
+TARGET_SIMS = 400
+RESUME_CHECKPOINT = None
 
 TRAINER_DEVICE = torch.device("cuda:0") 
 INFERENCE_DEVICE = torch.device("cuda:0") 
@@ -131,167 +128,19 @@ class InferenceServer:
                         cursor += num_samples
 
 # =============================================================================
-# [NEW] Rule-Based Worker (합성 데이터 생성기)
-# =============================================================================
-@ray.remote(num_cpus=1)
-class RuleBasedWorker:
-    def __init__(self, buffer_ref):
-        self.buffer_ref = buffer_ref
-        self.board_size = BOARD_SIZE
-
-    def check_win(self, board, player):
-        # 간단한 파이썬 승리 판별 (가로, 세로, 대각선)
-        # board: (15, 15), player: 1 or -1
-        # (최적화보다는 가독성 위주 구현)
-        for x in range(self.board_size):
-            for y in range(self.board_size):
-                if board[x, y] == player:
-                    # 가로, 세로, 대각선 2방향
-                    directions = [(0,1), (1,0), (1,1), (1,-1)]
-                    for dx, dy in directions:
-                        count = 1
-                        for i in range(1, 5):
-                            nx, ny = x + dx*i, y + dy*i
-                            if 0 <= nx < self.board_size and 0 <= ny < self.board_size and board[nx, ny] == player:
-                                count += 1
-                            else:
-                                break
-                        if count == 5: return True
-        return False
-
-    def get_attacker_move(self, board, player):
-        # 1. 5목이 되는 수가 있으면 무조건 둠 (승리)
-        # 2. 4목이 되는 수가 있으면 둠
-        # 3. 내 돌 주변(1칸 범위)에 둠
-        # 4. 없으면 랜덤
-        candidates = []
-        my_stones = list(zip(*np.where(board == player)))
-        empty_spots = list(zip(*np.where(board == 0)))
-        
-        if not empty_spots: return None
-
-        # [Logic 1 & 2] 중요 위치 탐색 (단순화: 4->5, 3->4)
-        # 파이썬으로 매번 전체 검사하면 느리므로, 내 돌 주변만 검사
-        moves_score = {}
-        
-        potential_moves = set()
-        for r, c in my_stones:
-            for dr in [-1, 0, 1]:
-                for dc in [-1, 0, 1]:
-                    nr, nc = r+dr, c+dc
-                    if 0 <= nr < self.board_size and 0 <= nc < self.board_size and board[nr, nc] == 0:
-                        potential_moves.add((nr, nc))
-        
-        # 4목, 5목 체크 (시뮬레이션)
-        best_move = None
-        best_priority = -1 # 0: clustering, 1: make 4, 2: make 5
-        
-        if not potential_moves: # 첫 수 혹은 돌이 없을 때
-             return random.choice(empty_spots)
-
-        for r, c in potential_moves:
-            # 가상 착수
-            board[r, c] = player
-            if self.check_win(board, player):
-                board[r, c] = 0
-                return (r, c) # 승리하는 수 발견
-            
-            # 4목 체크 (약식: 4개 연결되면 우선순위 높음)
-            # 여기서는 복잡한 룰 대신 간단히 '연결성'만 봄
-            board[r, c] = 0
-        
-        # [Logic 3] Clustering (그냥 랜덤하게 둠, 대신 내 돌 근처)
-        return random.choice(list(potential_moves))
-
-    def get_random_move(self, board):
-        empty = np.where(board == 0)
-        if len(empty[0]) == 0: return None
-        idx = np.random.randint(len(empty[0]))
-        return (empty[0][idx], empty[1][idx])
-
-    def generate_game(self, attacker_color):
-        # attacker_color: 1(Black) or -1(White)
-        # Attacker는 규칙대로, Defender는 랜덤으로 둠
-        board = np.zeros((self.board_size, self.board_size), dtype=int)
-        history = [] # (state, pi, player)
-        
-        curr = 1 # Black starts
-        
-        for _ in range(self.board_size * self.board_size):
-            # 행동 결정
-            if curr == attacker_color:
-                move = self.get_attacker_move(board, curr)
-            else:
-                move = self.get_random_move(board) # 수비수는 랜덤 (바보)
-            
-            if move is None: break # 보드 꽉 참
-            
-            # State 저장용
-            state = np.zeros((3, self.board_size, self.board_size), dtype=np.float32)
-            state[0] = (board == curr).astype(np.float32)
-            state[1] = (board == -curr).astype(np.float32)
-            state[2] = 1.0 
-            
-            # PI (One-hot)
-            pi = np.zeros(self.board_size * self.board_size, dtype=np.float32)
-            pi[move[0]*self.board_size + move[1]] = 1.0
-            
-            history.append([state, pi, curr])
-            board[move] = curr
-            
-            # [수정됨] 누가 이겼든 상관없이 승패가 나면 무조건 저장!
-            if self.check_win(board, curr):
-                return history, curr # (Data, Winner) - 무조건 리턴
-            
-            curr = -curr
-            
-        return None, None # 무승부는 학습 가치가 낮으므로 버림 (혹은 취향껏)
-
-    def get_equi_data(self, history, winner):
-        extend_data = []
-        # Winner 기준 Z값 설정
-        for state, pi, player in history:
-            z = 1.0 if player == winner else -1.0
-            
-            pi_board = pi.reshape(self.board_size, self.board_size)
-            for i in [1, 2, 3, 4]:
-                # Rotate
-                equi_state = np.array([np.rot90(s, k=i) for s in state])
-                equi_pi = np.rot90(pi_board, k=i)
-                extend_data.append([equi_state, equi_pi.flatten(), z])
-                
-                # Flip
-                equi_state_flip = np.array([np.fliplr(s) for s in equi_state])
-                equi_pi_flip = np.fliplr(equi_pi)
-                extend_data.append([equi_state_flip, equi_pi_flip.flatten(), z])
-        return extend_data
-
-    def run(self, num_games):
-        generated = 0
-        while generated < num_games:
-            # 50:50 확률로 흑공격/백공격 생성
-            attacker = 1 if random.random() < 0.5 else -1
-            history, winner = self.generate_game(attacker)
-            
-            if history is not None:
-                # 데이터 증강 후 버퍼 전송
-                aug_data = self.get_equi_data(history, winner)
-                self.buffer_ref.add.remote(aug_data)
-                generated += 1
-                if generated % 100 == 0:
-                    print(f"⚡ Synthetic Data: {generated}/{num_games} generated")
-        print("✅ Synthetic Data Generation Complete!")
-
-
-# =============================================================================
 # [4] Data Worker (MCTS - 기존과 동일)
 # =============================================================================
 @ray.remote(num_cpus=1)
 class DataWorker:
     def __init__(self, buffer_ref, inference_server):
+        seed = int(time.time() * 1000000) % (2**32)
+        np.random.seed(seed)
+        random.seed(seed)
+        torch.manual_seed(seed)
+        
         self.buffer_ref = buffer_ref
         self.inference_server = inference_server
-        self.num_parallel_games = 128
+        self.num_parallel_games = 64
         self.mcts_envs = [mcts_core.MCTS() for _ in range(self.num_parallel_games)]
         self.histories = [[] for _ in range(self.num_parallel_games)]
         self.sim_counts = [0] * self.num_parallel_games
@@ -299,6 +148,10 @@ class DataWorker:
         for mcts in self.mcts_envs:
             mcts.reset()
             mcts.add_root_noise(0.3, 0.25)
+
+    # DataWorker 클래스 내부
+    def get_seed(self):
+        return np.random.get_state()[1][0] # 혹은 저장해둔 self.seed 반환
 
     def get_equi_data(self, history):
         extend_data = []
@@ -336,7 +189,7 @@ class DataWorker:
             for i in range(self.num_parallel_games):
                 if self.sim_counts[i] >= TARGET_SIMS:
                     mcts = self.mcts_envs[i]
-                    temp = 1.0 if self.step_counts[i] < 30 else 0.1
+                    temp = 1.0 if self.step_counts[i] < 5 else 0.1
                     state, pi = mcts.get_action_probs(temp)
                     current_player = mcts.get_current_player()
                     self.histories[i].append([state, pi, current_player])
@@ -389,8 +242,104 @@ class ReplayBuffer:
     # [핵심] 누적 데이터 개수 반환
     def get_total_added(self):
         return self.total_added
+
+import matplotlib
+matplotlib.use('Agg') # [중요] GUI 없는 리눅스에서 에러 방지
+import matplotlib.pyplot as plt
+import numpy as np
+
+def save_debug_files(step, s_batch, pi_batch, z_batch):
+    """
+    배치 데이터 중 첫 번째 샘플을 텍스트와 이미지로 저장합니다.
+    """
+    # 텐서 -> 넘파이 변환 (필요시)
+    if hasattr(s_batch, 'cpu'): s_batch = s_batch.cpu().numpy()
+    if hasattr(pi_batch, 'cpu'): pi_batch = pi_batch.cpu().numpy()
+    if hasattr(z_batch, 'cpu'): z_batch = z_batch.cpu().numpy()
+
+    # 첫 번째 샘플만 추출
+    state = s_batch[0]   # (3, 15, 15)
+    pi = pi_batch[0]     # (225,)
+    z = z_batch[0]       # Scalar
+
+    # ---------------------------------------------------------
+    # [1] 텍스트 파일 저장 (debug_logs 폴더)
+    # ---------------------------------------------------------
+    if not os.path.exists("debug_logs"): os.makedirs("debug_logs")
     
+    txt_path = f"debug_logs/step_{step}.txt"
+    with open(txt_path, "w") as f:
+        f.write(f"Step: {step}\n")
+        f.write(f"Target Value (z): {float(z):.4f}  (1=Win, -1=Loss, 0=Draw)\n")
+        f.write("-" * 30 + "\n")
+        
+        # 바둑판 그리기 (ASCII)
+        my_stones = state[0]
+        opp_stones = state[1]
+        
+        f.write("   " + " ".join([f"{i%10}" for i in range(15)]) + "\n")
+        for r in range(15):
+            row_str = f"{r:2d} "
+            for c in range(15):
+                if my_stones[r, c] == 1:
+                    row_str += "O " # 내 돌 (Channel 0)
+                elif opp_stones[r, c] == 1:
+                    row_str += "X " # 상대 돌 (Channel 1)
+                else:
+                    row_str += ". "
+            f.write(row_str + "\n")
+        
+        f.write("-" * 30 + "\n")
+        f.write("Top 5 Policy Probabilities:\n")
+        top_indices = np.argsort(pi)[::-1][:5]
+        for idx in top_indices:
+            r, c = divmod(idx, 15)
+            f.write(f"  Pos({r},{c}): {pi[idx]:.4f}\n")
+
+    # ---------------------------------------------------------
+    # [2] 이미지 파일 저장 (채널별 시각화)
+    # ---------------------------------------------------------
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    
+    # 내 돌 (Channel 0)
+    axes[0].imshow(state[0], cmap='Blues', vmin=0, vmax=1)
+    axes[0].set_title(f"My Stones (Ch0)\nTurn info: {state[2][0][0]}")
+    
+    # 상대 돌 (Channel 1)
+    axes[1].imshow(state[1], cmap='Reds', vmin=0, vmax=1)
+    axes[1].set_title("Opponent Stones (Ch1)")
+    
+    # Policy 분포 (Heatmap)
+    pi_grid = pi.reshape(15, 15)
+    im = axes[2].imshow(pi_grid, cmap='viridis')
+    axes[2].set_title(f"Policy Heatmap\nTarget z={float(z):.2f}")
+    plt.colorbar(im, ax=axes[2])
+    
+    plt.savefig(f"debug_logs/step_{step}.png")
+    plt.close(fig)
+    
+    print(f"🐛 [DEBUG] Saved log and image to debug_logs/step_{step}.*")
+
+class DualLogger:
+    def __init__(self, filepath):
+        self.terminal = sys.stdout
+        self.log = open(filepath, "a", encoding='utf-8') # "a"는 append 모드
+
+    def write(self, message):
+        self.terminal.write(message) # 터미널에 출력
+        self.log.write(message)      # 파일에 출력
+        self.log.flush()             # 즉시 파일에 쓰기 (버퍼링 방지)
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
 if __name__ == "__main__":
+    if not os.path.exists("logs"):
+        os.makedirs("logs")
+        
+    sys.stdout = DualLogger("logs/training.log")
+
     if ray.is_initialized(): ray.shutdown()
     ray.init()
 
@@ -427,57 +376,23 @@ if __name__ == "__main__":
         
         print(f"✅ Resumed successfully from Step {step}")
         print("⏩ Skipping Synthetic Data Generation (Already trained model).")
-        
-    else:
-        print("🆕 Starting training from scratch.")
-        
-        # [STEP 1] 합성 데이터 주입
-        print(f"\n🧪 Generating Synthetic Data ({SYNTHETIC_GAMES} games)...")
-        syn_workers = [RuleBasedWorker.remote(buffer) for _ in range(4)]
-        ray.get([w.run.remote(SYNTHETIC_GAMES // 4) for w in syn_workers])
-        del syn_workers
-        
-        initial_buffer_size = ray.get(buffer.size.remote())
-        print(f"✅ Initial Buffer Filled: {initial_buffer_size} samples ready!\n")
-
-        # [STEP 1.5] Pre-training
-        print(f"🧠 Pre-training on Synthetic Data...")
-        pretrain_steps = (initial_buffer_size // BATCH_SIZE)*10
-        
-        model.train()
-        for i in range(pretrain_steps):
-            s_batch, pi_batch, z_batch = ray.get(buffer.sample.remote(BATCH_SIZE))
-            
-            s_tensor = torch.tensor(s_batch, dtype=torch.float32).to(TRAINER_DEVICE)
-            pi_tensor = torch.tensor(pi_batch, dtype=torch.float32).to(TRAINER_DEVICE)
-            z_tensor = torch.tensor(z_batch, dtype=torch.float32).to(TRAINER_DEVICE).unsqueeze(1)
-            
-            optimizer.zero_grad()
-            
-            # [AMP 수정 2] 최신 문법 적용 (autocast('cuda'))
-            with torch.amp.autocast('cuda'):
-                pred_pi, pred_v = model(s_tensor)
-                loss_pi = -torch.mean(torch.sum(pi_tensor * pred_pi, dim=1))
-                loss_v = F.mse_loss(pred_v, z_tensor)
-                total_loss = loss_pi + loss_v
-            
-            scaler.scale(total_loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            
-            step += 1
-            print(f"\r[Pre-train] Step {i+1}/{pretrain_steps} | Loss: {total_loss.item():.4f}", end="")
-        
-        print(f"\n✅ Pre-training Complete!")
-        cpu_weights = {k: v.cpu() for k, v in model.state_dict().items()}
-        ray.get(inference_server.update_weights.remote(cpu_weights))
-
 
     # -------------------------------------------------------------
     # [STEP 2] Main Loop
     # -------------------------------------------------------------
     print("🚀 Starting MCTS Workers...")
     workers = [DataWorker.remote(buffer, inference_server) for _ in range(NUM_ACTORS)]
+    
+    # [추가] 모든 워커가 초기화될 때까지 여기서 딱 대기함 (Block)
+    print("⏳ Waiting for all workers to initialize...")
+    
+    # 워커들의 get_seed 함수를 호출해서 결과를 다 받을 때까지 메인 프로세스를 멈춤
+    # 여기서 에러가 나거나 멈춰있으면 CPU 부족임
+    seeds = ray.get([w.get_seed.remote() for w in workers])
+    
+    print(f"✅ All Workers Ready! Seeds: {seeds}")
+    print(f"👉 Unique seeds count: {len(set(seeds))} / {NUM_ACTORS}") # 이게 10개여야 함
+    
     for w in workers: w.run.remote()
     
     print("🚀 Starting Adaptive Main Training Loop...")
@@ -524,7 +439,10 @@ if __name__ == "__main__":
             scaler.update()
             
             step += 1
-            
+
+            if step == 1 or step % 1000 == 0:
+                save_debug_files(step, s_tensor, pi_tensor, z_tensor)
+
             # [가중치 업데이트]
             if step % 50 == 0:
                 cpu_weights = {k: v.cpu() for k, v in model.state_dict().items()}

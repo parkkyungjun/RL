@@ -1,4 +1,5 @@
 // mcts_core.cpp
+// python setup.py build_ext --inplace
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
@@ -86,14 +87,14 @@ public:
                 for (int w = 0; w < BOARD_SIZE; ++w)
                     ptr(c, h, w) = 0.0f;
         
-        float turn_info = (current_player == 1) ? 1.0f : 0.0f;
+        // float turn_info = (current_player == 1) ? 1.0f : 0.0f;
         for (int i = 0; i < BOARD_AREA; ++i) {
             int r = i / BOARD_SIZE;
             int c = i % BOARD_SIZE;
             if (board[i] == current_player) ptr(0, r, c) = 1.0f;
             else if (board[i] == -current_player) ptr(1, r, c) = 1.0f;
-            // ptr(2, r, c) = 1.0f; // Turn info (always 1 for current player perspective)
-            ptr(2, r, c) = turn_info;
+            ptr(2, r, c) = 1.0f; // Turn info (always 1 for current player perspective)
+            // ptr(2, r, c) = turn_info;
         }
         return result;
     }
@@ -117,7 +118,14 @@ struct Node {
         return visit_count == 0 ? 0.0f : value_sum / visit_count;
     }
 
-    float ucb(float parent_visit_sqrt, float cpuct = 1.0f) const {
+    // float ucb(float parent_visit_sqrt, float cpuct = 1.0f) const {
+    //     return value() + cpuct * prior * parent_visit_sqrt / (1.0f + visit_count);
+    // }
+    float ucb(float parent_visit_sqrt, float base_cpuct = 1.25f, float init_cpuct = 2.5f) const {
+        // 논문 공식: cpuct(s) = log((parent_visit + base + 1) / base) + init
+        // 단순화된 버전 (널리 쓰임):
+        float cpuct = init_cpuct + std::log((parent_visit_sqrt * parent_visit_sqrt + 19652 + 1) / 19652.0f) * base_cpuct;
+        
         return value() + cpuct * prior * parent_visit_sqrt / (1.0f + visit_count);
     }
 };
@@ -190,7 +198,8 @@ public:
         scratch_game = root_game; // 복사 (비용 저렴함)
         search_path.clear();
         search_path.push_back(current_node);
-
+        
+        // float cpuct = 5.0f;
         while (current_node->is_expanded) {
             float sqrt_total_visit = std::sqrt((float)current_node->visit_count);
             float best_score = -1e9;
@@ -242,6 +251,7 @@ public:
 
             for (size_t i = 0; i < legal_actions.size(); ++i) {
                 float p = probs[i] / (sum_prob + 1e-8f);
+
                 current_node->children.push_back(std::make_unique<Node>(p, current_node, legal_actions[i]));
             }
             current_node->is_expanded = true;
