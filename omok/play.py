@@ -11,10 +11,10 @@ import mcts_core
 # =============================================================================
 # [1] 설정
 # =============================================================================
-BOARD_SIZE = 15
+BOARD_SIZE = 8
 NUM_RES_BLOCKS = 5      
 NUM_CHANNELS = 64
-MODEL_PATH = "models/model_380000.pth"  # ✅ 불러올 모델 경로 수정하세요
+MODEL_PATH = "models/checkpoint_7500.pth"  # ✅ 불러올 모델 경로 수정하세요
 NUM_MCTS_SIMS = 800  # 생각하는 횟수 (높을수록 잘하지만 느려짐)
 
 # =============================================================================
@@ -103,7 +103,7 @@ def main():
     # 모델 로드
     model = AlphaZeroNet().to(device)
     if os.path.exists(MODEL_PATH):
-        model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+        model.load_state_dict(torch.load(MODEL_PATH, map_location=device)['model_state_dict'])
         print(f"✅ 모델 로드 완료: {MODEL_PATH}")
     else:
         print(f"❌ 모델 파일을 찾을 수 없습니다: {MODEL_PATH}")

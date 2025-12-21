@@ -2,3 +2,7 @@ venv
 .venv
 *.mp4
 *.pth
+omok/debug_logs/
+omok/debug_games/
+omok/logs/
+omok/models/

@@ -13,21 +13,22 @@ import matplotlib.pyplot as plt
 import sys
 # C++ 모듈 (필요시 주석 처리하고 테스트 가능, 여기선 MCTS Worker에서 사용)
 import mcts_core 
+from logging_ import *
 
 # =============================================================================
 # [1] 설정
 # =============================================================================
-BOARD_SIZE = 15
+BOARD_SIZE = 8
 NUM_RES_BLOCKS = 5
 NUM_CHANNELS = 64
 BATCH_SIZE = 1024
 INFERENCE_BATCH_SIZE = 2048
 LR = 0.002
-BUFFER_SIZE = 200000
+BUFFER_SIZE = 20000
 NUM_ACTORS = 8
-SAVE_INTERVAL = 2000
-TARGET_SIMS = 400
-RESUME_CHECKPOINT = None
+SAVE_INTERVAL = 500
+TARGET_SIMS = 800
+RESUME_CHECKPOINT = './models/checkpoint_30000.pth'  # None 이면 새로 시작
 
 TRAINER_DEVICE = torch.device("cuda:0") 
 INFERENCE_DEVICE = torch.device("cuda:0") 
@@ -132,26 +133,31 @@ class InferenceServer:
 # =============================================================================
 @ray.remote(num_cpus=1)
 class DataWorker:
-    def __init__(self, buffer_ref, inference_server):
+    def __init__(self, buffer_ref, inference_server, worker_id): # worker_id 추가
         seed = int(time.time() * 1000000) % (2**32)
         np.random.seed(seed)
         random.seed(seed)
         torch.manual_seed(seed)
         
+        self.worker_id = worker_id  # 워커 ID 저장
         self.buffer_ref = buffer_ref
         self.inference_server = inference_server
-        self.num_parallel_games = 64
+        self.num_parallel_games = 2
         self.mcts_envs = [mcts_core.MCTS() for _ in range(self.num_parallel_games)]
         self.histories = [[] for _ in range(self.num_parallel_games)]
         self.sim_counts = [0] * self.num_parallel_games
         self.step_counts = [0] * self.num_parallel_games
+        
+        # [추가] 각 게임별 착수 기록을 저장할 리스트
+        self.action_logs = [[] for _ in range(self.num_parallel_games)]
+        self.game_counters = [0] * self.num_parallel_games # 몇 번째 게임인지 카운트
+
         for mcts in self.mcts_envs:
             mcts.reset()
             mcts.add_root_noise(0.3, 0.25)
 
-    # DataWorker 클래스 내부
     def get_seed(self):
-        return np.random.get_state()[1][0] # 혹은 저장해둔 self.seed 반환
+        return np.random.get_state()[1][0]
 
     def get_equi_data(self, history):
         extend_data = []
@@ -189,20 +195,33 @@ class DataWorker:
             for i in range(self.num_parallel_games):
                 if self.sim_counts[i] >= TARGET_SIMS:
                     mcts = self.mcts_envs[i]
-                    temp = 1.0 if self.step_counts[i] < 5 else 0.1
+                    temp = 1.0 if self.step_counts[i] < 10 else 0.1 # 초반 탐색 강화
                     state, pi = mcts.get_action_probs(temp)
                     current_player = mcts.get_current_player()
                     self.histories[i].append([state, pi, current_player])
+                    
                     action = np.random.choice(len(pi), p=pi)
+                    
+                    # [추가] 둔 수(Action)을 기록
+                    self.action_logs[i].append(action)
+
                     mcts.update_root_game(action)
                     self.step_counts[i] += 1
                     self.sim_counts[i] = 0
                     mcts.add_root_noise(0.3, 0.25)
                     
                     is_game_over, winner = mcts.check_game_status()
+                    
+                    # 게임 종료 조건
                     if is_game_over or self.step_counts[i] >= BOARD_SIZE * BOARD_SIZE:
+                        
+                        # [핵심] 게임 종료 시 로그 파일 저장!
+                        save_game_log(self.worker_id, self.game_counters[i], self.action_logs[i], winner, BOARD_SIZE)
+                        self.game_counters[i] += 1
+
                         processed_history = []
                         for h_state, h_pi, h_player in self.histories[i]:
+                            # 가치값(z) 할당 로직 (가장 의심스러운 부분 중 하나)
                             if winner == 0: z = 0.0
                             elif h_player == winner: z = 1.0
                             else: z = -1.0
@@ -214,9 +233,9 @@ class DataWorker:
                         mcts.reset()
                         mcts.add_root_noise(0.3, 0.25)
                         self.histories[i] = []
+                        self.action_logs[i] = [] # 로그 초기화
                         self.step_counts[i] = 0
                         self.sim_counts[i] = 0
-
 # =============================================================================
 # [5] 학습 루프 (Main)
 # =============================================================================
@@ -229,7 +248,7 @@ class ReplayBuffer:
 
     def add(self, history): 
         self.buffer.extend(history)
-        self.total_added += len(history) # 누적 증가
+        self.total_added += len(history) # 누적 증가``
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
@@ -242,97 +261,6 @@ class ReplayBuffer:
     # [핵심] 누적 데이터 개수 반환
     def get_total_added(self):
         return self.total_added
-
-import matplotlib
-matplotlib.use('Agg') # [중요] GUI 없는 리눅스에서 에러 방지
-import matplotlib.pyplot as plt
-import numpy as np
-
-def save_debug_files(step, s_batch, pi_batch, z_batch):
-    """
-    배치 데이터 중 첫 번째 샘플을 텍스트와 이미지로 저장합니다.
-    """
-    # 텐서 -> 넘파이 변환 (필요시)
-    if hasattr(s_batch, 'cpu'): s_batch = s_batch.cpu().numpy()
-    if hasattr(pi_batch, 'cpu'): pi_batch = pi_batch.cpu().numpy()
-    if hasattr(z_batch, 'cpu'): z_batch = z_batch.cpu().numpy()
-
-    # 첫 번째 샘플만 추출
-    state = s_batch[0]   # (3, 15, 15)
-    pi = pi_batch[0]     # (225,)
-    z = z_batch[0]       # Scalar
-
-    # ---------------------------------------------------------
-    # [1] 텍스트 파일 저장 (debug_logs 폴더)
-    # ---------------------------------------------------------
-    if not os.path.exists("debug_logs"): os.makedirs("debug_logs")
-    
-    txt_path = f"debug_logs/step_{step}.txt"
-    with open(txt_path, "w") as f:
-        f.write(f"Step: {step}\n")
-        f.write(f"Target Value (z): {float(z):.4f}  (1=Win, -1=Loss, 0=Draw)\n")
-        f.write("-" * 30 + "\n")
-        
-        # 바둑판 그리기 (ASCII)
-        my_stones = state[0]
-        opp_stones = state[1]
-        
-        f.write("   " + " ".join([f"{i%10}" for i in range(15)]) + "\n")
-        for r in range(15):
-            row_str = f"{r:2d} "
-            for c in range(15):
-                if my_stones[r, c] == 1:
-                    row_str += "O " # 내 돌 (Channel 0)
-                elif opp_stones[r, c] == 1:
-                    row_str += "X " # 상대 돌 (Channel 1)
-                else:
-                    row_str += ". "
-            f.write(row_str + "\n")
-        
-        f.write("-" * 30 + "\n")
-        f.write("Top 5 Policy Probabilities:\n")
-        top_indices = np.argsort(pi)[::-1][:5]
-        for idx in top_indices:
-            r, c = divmod(idx, 15)
-            f.write(f"  Pos({r},{c}): {pi[idx]:.4f}\n")
-
-    # ---------------------------------------------------------
-    # [2] 이미지 파일 저장 (채널별 시각화)
-    # ---------------------------------------------------------
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    
-    # 내 돌 (Channel 0)
-    axes[0].imshow(state[0], cmap='Blues', vmin=0, vmax=1)
-    axes[0].set_title(f"My Stones (Ch0)\nTurn info: {state[2][0][0]}")
-    
-    # 상대 돌 (Channel 1)
-    axes[1].imshow(state[1], cmap='Reds', vmin=0, vmax=1)
-    axes[1].set_title("Opponent Stones (Ch1)")
-    
-    # Policy 분포 (Heatmap)
-    pi_grid = pi.reshape(15, 15)
-    im = axes[2].imshow(pi_grid, cmap='viridis')
-    axes[2].set_title(f"Policy Heatmap\nTarget z={float(z):.2f}")
-    plt.colorbar(im, ax=axes[2])
-    
-    plt.savefig(f"debug_logs/step_{step}.png")
-    plt.close(fig)
-    
-    print(f"🐛 [DEBUG] Saved log and image to debug_logs/step_{step}.*")
-
-class DualLogger:
-    def __init__(self, filepath):
-        self.terminal = sys.stdout
-        self.log = open(filepath, "a", encoding='utf-8') # "a"는 append 모드
-
-    def write(self, message):
-        self.terminal.write(message) # 터미널에 출력
-        self.log.write(message)      # 파일에 출력
-        self.log.flush()             # 즉시 파일에 쓰기 (버퍼링 방지)
-
-    def flush(self):
-        self.terminal.flush()
-        self.log.flush()
 
 if __name__ == "__main__":
     if not os.path.exists("logs"):
@@ -381,8 +309,10 @@ if __name__ == "__main__":
     # [STEP 2] Main Loop
     # -------------------------------------------------------------
     print("🚀 Starting MCTS Workers...")
-    workers = [DataWorker.remote(buffer, inference_server) for _ in range(NUM_ACTORS)]
+    # workers = [DataWorker.remote(buffer, inference_server) for _ in range(NUM_ACTORS)]
     
+    workers = [DataWorker.remote(buffer, inference_server, i) for i in range(NUM_ACTORS)]
+
     # [추가] 모든 워커가 초기화될 때까지 여기서 딱 대기함 (Block)
     print("⏳ Waiting for all workers to initialize...")
     
@@ -405,20 +335,22 @@ if __name__ == "__main__":
     MAX_STEPS_PER_CYCLE = 1000 
 
     loss_history = {'step': [], 'total': [], 'pi': [], 'v': []}
+
     while True:
         current_total_added = ray.get(buffer.get_total_added.remote())
         new_data_count = current_total_added - last_total_added
-        
-        if new_data_count < BATCH_SIZE:
-            time.sleep(0.1)
-            continue
 
+        if new_data_count < BATCH_SIZE:
+            time.sleep(.1)
+            continue
+        
         needed_steps = int((new_data_count / BATCH_SIZE) * TARGET_REPLAY_RATIO)
         steps_to_run = max(1, min(needed_steps, MAX_STEPS_PER_CYCLE))
 
         # =================================================================
         # 학습 루프 (Training Loop)
         # =================================================================
+        T = time.time()
         for _ in range(steps_to_run):
             s_batch, pi_batch, z_batch = ray.get(buffer.sample.remote(BATCH_SIZE))
             
@@ -476,18 +408,16 @@ if __name__ == "__main__":
         # 루프 종료 후 동기화 및 로그 출력
         # =================================================================
         last_total_added = current_total_added # 포인터 최신화
+
+        current_buffer_size = ray.get(buffer.size.remote())
+
+        print(f"[Step {step}] Loss: {total_loss.item():.4f} | "
+                f"New Data: +{new_data_count} / Trained: {steps_to_run} steps | "
+                f"Buf: {current_buffer_size} / ⏱️ Training Cycle Completed in {time.time() - T:.2f}s / in Training Adding {current_buffer_size - last_total_added}")
         
-        if step % 50 == 0 or steps_to_run > 100:
-            trained_since_last_log = step - last_log_step
-            current_buffer_size = ray.get(buffer.size.remote())
-            
-            print(f"[Step {step}] Loss: {total_loss.item():.4f} | "
-                  f"New Data: +{new_data_count} / Trained: {trained_since_last_log} steps | "
-                  f"Buf: {current_buffer_size}")
-            
-            last_log_step = step
-            
-            loss_history['step'].append(step)
-            loss_history['total'].append(total_loss.item())
-            loss_history['pi'].append(loss_pi.item())
-            loss_history['v'].append(loss_v.item())
+        last_log_step = step
+        
+        loss_history['step'].append(step)
+        loss_history['total'].append(total_loss.item())
+        loss_history['pi'].append(loss_pi.item())
+        loss_history['v'].append(loss_v.item())

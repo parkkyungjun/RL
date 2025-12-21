@@ -12,7 +12,7 @@
 
 namespace py = pybind11;
 
-const int BOARD_SIZE = 15;
+const int BOARD_SIZE = 8;
 const int BOARD_AREA = BOARD_SIZE * BOARD_SIZE;
 
 // --- Fast Gomoku Logic ---
@@ -61,7 +61,8 @@ public:
                     nc += dc[i] * sign;
                 }
             }
-            if (count >= 5) return {true, player};
+            // if (count >= 5) return {true, player};
+            if (count >= 4) return {true, player};
         }
         if (move_count == BOARD_AREA) return {true, 0}; // Draw
         return {false, 0};
@@ -126,7 +127,7 @@ struct Node {
         // 단순화된 버전 (널리 쓰임):
         float cpuct = init_cpuct + std::log((parent_visit_sqrt * parent_visit_sqrt + 19652 + 1) / 19652.0f) * base_cpuct;
         
-        return value() + cpuct * prior * parent_visit_sqrt / (1.0f + visit_count);
+        return -value() + cpuct * prior * parent_visit_sqrt / (1.0f + visit_count);
     }
 };
 
