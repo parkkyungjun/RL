@@ -28,7 +28,7 @@ BUFFER_SIZE = 20000
 NUM_ACTORS = 8
 SAVE_INTERVAL = 500
 TARGET_SIMS = 800
-RESUME_CHECKPOINT = './models/checkpoint_30000.pth'  # None 이면 새로 시작
+RESUME_CHECKPOINT = './models/checkpoint_30000_.pth'  # None 이면 새로 시작
 
 TRAINER_DEVICE = torch.device("cuda:0") 
 INFERENCE_DEVICE = torch.device("cuda:0") 
@@ -133,13 +133,13 @@ class InferenceServer:
 # =============================================================================
 @ray.remote(num_cpus=1)
 class DataWorker:
-    def __init__(self, buffer_ref, inference_server, worker_id): # worker_id 추가
+    def __init__(self, buffer_ref, inference_server, worker_id):
         seed = int(time.time() * 1000000) % (2**32)
         np.random.seed(seed)
         random.seed(seed)
         torch.manual_seed(seed)
         
-        self.worker_id = worker_id  # 워커 ID 저장
+        self.worker_id = worker_id
         self.buffer_ref = buffer_ref
         self.inference_server = inference_server
         self.num_parallel_games = 2
@@ -148,9 +148,11 @@ class DataWorker:
         self.sim_counts = [0] * self.num_parallel_games
         self.step_counts = [0] * self.num_parallel_games
         
-        # [추가] 각 게임별 착수 기록을 저장할 리스트
         self.action_logs = [[] for _ in range(self.num_parallel_games)]
-        self.game_counters = [0] * self.num_parallel_games # 몇 번째 게임인지 카운트
+        self.game_counters = [0] * self.num_parallel_games
+        
+        # [변경] 이 게임에서 랜덤 수를 이미 뒀는지 체크하는 플래그
+        self.has_played_random = [False] * self.num_parallel_games 
 
         for mcts in self.mcts_envs:
             mcts.reset()
@@ -174,6 +176,7 @@ class DataWorker:
 
     def run(self):
         while True:
+            # --- MCTS Simulation Phase (변경 없음) ---
             states_to_infer = []
             indices_to_infer = []
             for i in range(self.num_parallel_games):
@@ -192,17 +195,38 @@ class DataWorker:
                     self.mcts_envs[idx].backpropagate(policy, value.item())
                     self.sim_counts[idx] += 1
 
+            # --- Action Phase ---
             for i in range(self.num_parallel_games):
                 if self.sim_counts[i] >= TARGET_SIMS:
                     mcts = self.mcts_envs[i]
-                    temp = 1.0 if self.step_counts[i] < 10 else 0.1 # 초반 탐색 강화
+                    temp = 1.0 if self.step_counts[i] < 30 else 0.1
                     state, pi = mcts.get_action_probs(temp)
                     current_player = mcts.get_current_player()
                     self.histories[i].append([state, pi, current_player])
                     
-                    action = np.random.choice(len(pi), p=pi)
+                    # [핵심 변경 로직]
+                    # 1. 흑 차례인가? (보통 0부터 시작하므로 짝수 턴이 흑)
+                    # 2. 이 게임에서 아직 랜덤 수를 안 뒀는가?
+                    # 3. 10% 확률에 당첨되었는가?
+                    is_black_turn = (self.step_counts[i] % 2 == 0)
+                    triggered_random = False
                     
-                    # [추가] 둔 수(Action)을 기록
+                    if is_black_turn and not self.has_played_random[i]:
+                        if np.random.rand() < 0.1: # 10% 확률
+                            triggered_random = True
+                            self.has_played_random[i] = True # "사용함" 처리 (재사용 방지)
+                    
+                    if triggered_random:
+                        # MCTS 정책(pi)에서 둘 수 있는 곳(0보다 큰 곳)만 필터링 -> 기존 돌 제외됨
+                        valid_moves = np.where(pi > 0)[0]
+                        if len(valid_moves) > 0:
+                            action = np.random.choice(valid_moves)
+                        else:
+                            action = np.argmax(pi) # 예외 처리
+                    else:
+                        # 평소대로 확률 분포에 따라 선택
+                        action = np.random.choice(len(pi), p=pi)
+                    
                     self.action_logs[i].append(action)
 
                     mcts.update_root_game(action)
@@ -212,16 +236,12 @@ class DataWorker:
                     
                     is_game_over, winner = mcts.check_game_status()
                     
-                    # 게임 종료 조건
                     if is_game_over or self.step_counts[i] >= BOARD_SIZE * BOARD_SIZE:
-                        
-                        # [핵심] 게임 종료 시 로그 파일 저장!
                         save_game_log(self.worker_id, self.game_counters[i], self.action_logs[i], winner, BOARD_SIZE)
                         self.game_counters[i] += 1
 
                         processed_history = []
                         for h_state, h_pi, h_player in self.histories[i]:
-                            # 가치값(z) 할당 로직 (가장 의심스러운 부분 중 하나)
                             if winner == 0: z = 0.0
                             elif h_player == winner: z = 1.0
                             else: z = -1.0
@@ -233,9 +253,12 @@ class DataWorker:
                         mcts.reset()
                         mcts.add_root_noise(0.3, 0.25)
                         self.histories[i] = []
-                        self.action_logs[i] = [] # 로그 초기화
+                        self.action_logs[i] = []
                         self.step_counts[i] = 0
                         self.sim_counts[i] = 0
+                        
+                        # [초기화] 새 게임이 시작되므로 플래그를 False로 리셋
+                        self.has_played_random[i] = False
 # =============================================================================
 # [5] 학습 루프 (Main)
 # =============================================================================
@@ -328,10 +351,9 @@ if __name__ == "__main__":
     print("🚀 Starting Adaptive Main Training Loop...")
     
     last_total_added = ray.get(buffer.get_total_added.remote())
-    last_log_total_added = last_total_added
     last_log_step = step
     
-    TARGET_REPLAY_RATIO = 10.0 
+    TARGET_REPLAY_RATIO = 8.0 
     MAX_STEPS_PER_CYCLE = 1000 
 
     loss_history = {'step': [], 'total': [], 'pi': [], 'v': []}
@@ -413,7 +435,7 @@ if __name__ == "__main__":
 
         print(f"[Step {step}] Loss: {total_loss.item():.4f} | "
                 f"New Data: +{new_data_count} / Trained: {steps_to_run} steps | "
-                f"Buf: {current_buffer_size} / ⏱️ Training Cycle Completed in {time.time() - T:.2f}s / in Training Adding {current_buffer_size - last_total_added}")
+                f"Buf: {current_buffer_size} / ⏱️ Training Cycle Completed in {time.time() - T:.2f}s / Total Adding {current_total_added}")
         
         last_log_step = step
         
