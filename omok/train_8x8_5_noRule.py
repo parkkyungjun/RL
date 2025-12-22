@@ -212,7 +212,7 @@ class DataWorker:
                     # 2. 이 게임에서 아직 랜덤 수를 안 뒀는가?
                     # 3. 10% 확률에 당첨되었는가?
                     is_black_turn = (self.step_counts[i] % 2 == 0)
-                    triggered_random = False 
+                    triggered_random = False
                     
                     if is_black_turn and not self.has_played_random[i]:
                         if np.random.rand() < 0.1: # 10% 확률

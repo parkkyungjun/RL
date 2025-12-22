@@ -30,7 +30,7 @@ public:
         move_count = 0;
     }
 
-    // 복사 생성자 (시뮬레이션용)
+    // 복사 생성자
     GomokuGame(const GomokuGame& other) = default;
 
     bool step(int action) {
@@ -61,41 +61,183 @@ public:
                     nc += dc[i] * sign;
                 }
             }
-            if (count == 5) return {true, player};
-            // if (count == 4) return {true, player};
+            if (player == 1) {
+                if (count == 5) return {true, player};
+            } else {
+                if (count >= 5) return {true, player};
+            }
         }
-        if (move_count == BOARD_AREA) return {true, 0}; // Draw
+        if (move_count == BOARD_AREA) return {true, 0};
         return {false, 0};
     }
 
     std::vector<int> get_legal_actions() {
         std::vector<int> legals;
         legals.reserve(BOARD_AREA - move_count);
+        
         for (int i = 0; i < BOARD_AREA; ++i) {
-            if (board[i] == 0) legals.push_back(i);
+            if (board[i] == 0) {
+                if (current_player == 1) {
+                    if (!is_forbidden(i)) {
+                        legals.push_back(i);
+                    }
+                } else {
+                    legals.push_back(i);
+                }
+            }
         }
         return legals;
     }
 
-    // 신경망 입력용 3x15x15 텐서 생성
+    bool is_forbidden(int idx) {
+        int r = idx / BOARD_SIZE;
+        int c = idx % BOARD_SIZE;
+        
+        board[idx] = 1; // 가상 착수
+
+        if (check_overline(r, c)) {
+            board[idx] = 0;
+            return true;
+        }
+
+        int three_count = 0;
+        int four_count = 0;
+
+        int dr[] = {0, 1, 1, 1};
+        int dc[] = {1, 0, 1, -1};
+
+        for (int i = 0; i < 4; ++i) {
+            int info = check_line_status(r, c, dr[i], dc[i]);
+            if (info == 3) three_count++;
+            else if (info == 4) four_count++;
+        }
+
+        board[idx] = 0; // 복구
+
+        if (four_count >= 2) return true;  // 4-4
+        if (three_count >= 2) return true; // 3-3
+
+        return false;
+    }
+
+    bool check_overline(int r, int c) {
+        int dr[] = {0, 1, 1, 1};
+        int dc[] = {1, 0, 1, -1};
+        
+        for (int i = 0; i < 4; ++i) {
+            int count = 1;
+            for (int sign : {-1, 1}) {
+                int nr = r + dr[i] * sign;
+                int nc = c + dc[i] * sign;
+                while (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE && board[nr * BOARD_SIZE + nc] == 1) {
+                    count++;
+                    nr += dr[i] * sign;
+                    nc += dc[i] * sign;
+                }
+            }
+            if (count > 5) return true;
+        }
+        return false;
+    }
+    
+    // [성능 개선] vector 대신 fixed array 사용
+    int check_line_status(int r, int c, int dr, int dc) {
+        // center index is 4
+        int line[9]; 
+        
+        for (int k = -4; k <= 4; ++k) {
+            int nr = r + k * dr;
+            int nc = c + k * dc;
+            if (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE) {
+                line[k + 4] = board[nr * BOARD_SIZE + nc];
+            } else {
+                line[k + 4] = 2; // Wall
+            }
+        }
+
+        // 4 Check Patterns (Straight & Broken)
+        // 11110, 01111, 10111, 11011, 11101
+        // (주의: 여기 패턴들은 5가 될 가능성이 있는 4여야 함)
+        static const std::vector<std::vector<int>> pats4 = {
+            {1,1,1,1,0}, {0,1,1,1,1}, 
+            {1,0,1,1,1}, {1,1,0,1,1}, {1,1,1,0,1}
+        };
+
+        for (const auto& p : pats4) {
+            if (has_pattern(line, p)) return 4;
+        }
+
+        // 3 Check Patterns (Must be Open Three: 01110 or broken equivalents)
+        static const std::vector<std::vector<int>> pats3 = {
+            {0,1,1,1,0}, 
+            {0,1,0,1,1,0}, {0,1,1,0,1,0}
+        };
+
+        for (const auto& p : pats3) {
+            if (has_pattern(line, p)) return 3;
+        }
+
+        return 0;
+    }
+
+    // [버그 수정] 패턴이 반드시 '중심(인덱스 4)'을 포함하고 있는지 확인
+    bool has_pattern(const int* line, const std::vector<int>& pat) {
+        int line_len = 9;
+        int pat_len = pat.size();
+        int center = 4; // 내가 둔 돌의 위치
+
+        for (int i = 0; i <= line_len - pat_len; ++i) {
+            // 1. 패턴 매칭 확인
+            bool match = true;
+            for (int j = 0; j < pat_len; ++j) {
+                if (line[i+j] != pat[j]) {
+                    match = false;
+                    break;
+                }
+            }
+            
+            if (match) {
+                // 2. [핵심] 찾은 패턴이 내가 둔 돌(center)을 포함하는가?
+                // 패턴의 범위: i ~ i + pat_len - 1
+                if (center >= i && center < i + pat_len) {
+                    // 3. 내가 둔 돌 자리가 패턴상 '1'(돌)이어야 함 (빈칸으로 쓰이는 게 아니라)
+                    if (pat[center - i] == 1) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     py::array_t<float> get_state() {
         py::array_t<float> result({3, BOARD_SIZE, BOARD_SIZE});
         auto ptr = result.mutable_unchecked<3>();
         
-        // 0으로 초기화
+        // 1. 전체 0.0f로 초기화
+        // (안전하게 루프 돌리거나 memset 사용)
         for (int c = 0; c < 3; ++c)
             for (int h = 0; h < BOARD_SIZE; ++h)
                 for (int w = 0; w < BOARD_SIZE; ++w)
                     ptr(c, h, w) = 0.0f;
         
-        // float turn_info = (current_player == 1) ? 1.0f : 0.0f;
+        // 2. 현재 플레이어 색상 정보 (Color Plane)
+        // 흑(1)이면 1.0, 백(-1)이면 0.0 (혹은 그 반대도 상관없음, 일관성만 있으면 됨)
+        float turn_info = (current_player == 1) ? 1.0f : 0.0f;
+
         for (int i = 0; i < BOARD_AREA; ++i) {
             int r = i / BOARD_SIZE;
             int c = i % BOARD_SIZE;
-            if (board[i] == current_player) ptr(0, r, c) = 1.0f;
-            else if (board[i] == -current_player) ptr(1, r, c) = 1.0f;
-            ptr(2, r, c) = 1.0f; // Turn info (always 1 for current player perspective)
-            // ptr(2, r, c) = turn_info;
+            
+            // 채널 0: 내 돌
+            if (board[i] == current_player) 
+                ptr(0, r, c) = 1.0f;
+            // 채널 1: 상대 돌
+            else if (board[i] == -current_player) 
+                ptr(1, r, c) = 1.0f;
+            
+            // 채널 2: 내가 흑인가 백인가? (판 전체에 같은 값을 채움)
+            ptr(2, r, c) = turn_info; 
         }
         return result;
     }
