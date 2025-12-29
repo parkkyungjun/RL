@@ -14,12 +14,12 @@ import mcts_core
 BOARD_SIZE = 8
 NUM_RES_BLOCKS = 5      
 NUM_CHANNELS = 64
-MODEL_PATH = "models/checkpoint_7500.pth"  # ✅ 불러올 모델 경로 수정하세요
+MODEL_PATH = "models/checkpoint_4000.pth"  # ✅ 불러올 모델 경로 수정하세요
 NUM_MCTS_SIMS = 800  # 생각하는 횟수 (높을수록 잘하지만 느려짐)
 
 # =============================================================================
 # [2] 신경망 클래스 (학습 코드와 동일해야 함)
-# =============================================================================
+# ============================================================================= 
 class ResBlock(nn.Module):
     def __init__(self, channels):
         super().__init__()
@@ -197,11 +197,12 @@ def main():
             r, c = ai_action // BOARD_SIZE, ai_action % BOARD_SIZE
             print(f"🤖 AI가 ({r}, {c})에 두었습니다.")
             
-            is_end = mcts.update_root_game(ai_action)
+            mcts.update_root_game(ai_action)
+            is_game_over, winner = mcts.check_game_status()
             local_board[r][c] = turn
             print_board(local_board)
             
-            if is_end:
+            if is_game_over:
                 print("💀 AI가 이겼습니다. 더 수련하고 오세요.")
                 break
 

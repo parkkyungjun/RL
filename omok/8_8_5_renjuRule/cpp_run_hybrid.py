@@ -18,18 +18,17 @@ from logging_ import *
 # =============================================================================
 # [1] 설정
 # =============================================================================
-BOARD_SIZE = 15
-NUM_RES_BLOCKS = 8
-NUM_CHANNELS = 128
+BOARD_SIZE = 8
+NUM_RES_BLOCKS = 5
+NUM_CHANNELS = 64
 BATCH_SIZE = 1024
-INFERENCE_BATCH_SIZE = 512
-LR = 0.001
-BUFFER_SIZE = 150000
+INFERENCE_BATCH_SIZE = 2048
+LR = 0.002
+BUFFER_SIZE = 20000
 NUM_ACTORS = 8
 SAVE_INTERVAL = 500
-TARGET_SIMS = 1600
-RESUME_CHECKPOINT = None # "models/checkpoint_5500.pth"  # None 이면 새로 시작
-NUM_PARALLEL_GAMES = 16
+TARGET_SIMS = 800
+RESUME_CHECKPOINT = None
 
 TRAINER_DEVICE = torch.device("cuda:0") 
 INFERENCE_DEVICE = torch.device("cuda:0") 
@@ -40,53 +39,35 @@ INFERENCE_DEVICE = torch.device("cuda:0")
 class ResBlock(nn.Module):
     def __init__(self, channels):
         super().__init__()
-        # [설정 추천] 64채널이면 groups=8 정도가 적당함 (그룹당 8채널)
         self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
-        self.bn1 = nn.GroupNorm(num_groups=8, num_channels=channels)
-        
+        self.bn1 = nn.BatchNorm2d(channels)
         self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
-        self.bn2 = nn.GroupNorm(num_groups=8, num_channels=channels)
-
+        self.bn2 = nn.BatchNorm2d(channels)
     def forward(self, x):
         res = x
         x = F.relu(self.bn1(self.conv1(x)))
         x = self.bn2(self.conv2(x))
         return F.relu(x + res)
-    
+
 class AlphaZeroNet(nn.Module):
     def __init__(self):
         super().__init__()
         self.start_conv = nn.Conv2d(3, NUM_CHANNELS, 3, padding=1)
-        # [수정] bn_start도 GroupNorm으로 교체 (채널 64, 그룹 8)
-        self.bn_start = nn.GroupNorm(num_groups=8, num_channels=NUM_CHANNELS)
-        
+        self.bn_start = nn.BatchNorm2d(NUM_CHANNELS)
         self.backbone = nn.Sequential(*[ResBlock(NUM_CHANNELS) for _ in range(NUM_RES_BLOCKS)])
-        
         self.policy_head = nn.Sequential(
-            nn.Conv2d(NUM_CHANNELS, 2, 1), 
-            # 채널이 2개뿐이므로 그룹은 1개 또는 2개만 가능. 1개 추천(LayerNorm 효과)
-            nn.GroupNorm(num_groups=1, num_channels=2), 
-            nn.ReLU(),
-            nn.Flatten(), 
-            nn.Linear(2 * BOARD_SIZE * BOARD_SIZE, BOARD_SIZE * BOARD_SIZE)
+            nn.Conv2d(NUM_CHANNELS, 2, 1), nn.BatchNorm2d(2), nn.ReLU(),
+            nn.Flatten(), nn.Linear(2 * BOARD_SIZE * BOARD_SIZE, BOARD_SIZE * BOARD_SIZE)
         )
-        
         self.value_head = nn.Sequential(
-            nn.Conv2d(NUM_CHANNELS, 1, 1), 
-            # [버그 수정] 채널이 1개이므로 num_channels=1 이어야 함!
-            nn.GroupNorm(num_groups=1, num_channels=1), 
-            nn.ReLU(),
-            nn.Flatten(), 
-            nn.Linear(BOARD_SIZE * BOARD_SIZE, 64), 
-            nn.ReLU(),
-            nn.Linear(64, 1), 
-            nn.Tanh()
+            nn.Conv2d(NUM_CHANNELS, 1, 1), nn.BatchNorm2d(1), nn.ReLU(),
+            nn.Flatten(), nn.Linear(BOARD_SIZE * BOARD_SIZE, 64), nn.ReLU(),
+            nn.Linear(64, 1), nn.Tanh()
         )
-        
     def forward(self, x):
         x = F.relu(self.bn_start(self.start_conv(x)))
         x = self.backbone(x)
-        policy = self.policy_head(x)
+        policy = F.log_softmax(self.policy_head(x), dim=1)
         value = self.value_head(x)
         return policy, value
 
@@ -137,8 +118,7 @@ class InferenceServer:
                     states_np = np.concatenate(batch_inputs, axis=0)
                     states = torch.tensor(states_np, dtype=torch.float32).to(INFERENCE_DEVICE)
                     pi_logits, values = self.model(states)
-                    # probs = torch.exp(pi_logits).cpu().numpy()
-                    probs = F.softmax(pi_logits, dim=1).cpu().numpy()
+                    probs = torch.exp(pi_logits).cpu().numpy()
                     vals = values.cpu().numpy()
                 
                 cursor = 0
@@ -162,7 +142,7 @@ class DataWorker:
         self.worker_id = worker_id
         self.buffer_ref = buffer_ref
         self.inference_server = inference_server
-        self.num_parallel_games = NUM_PARALLEL_GAMES
+        self.num_parallel_games = 2
         self.mcts_envs = [mcts_core.MCTS() for _ in range(self.num_parallel_games)]
         self.histories = [[] for _ in range(self.num_parallel_games)]
         self.sim_counts = [0] * self.num_parallel_games
@@ -196,30 +176,7 @@ class DataWorker:
                 equi_pi_flip = np.fliplr(equi_pi)
                 extend_data.append([equi_state_flip, equi_pi_flip.flatten(), z])
         return extend_data
-    
-    def save_crash_dump(self, game_idx, pi, error_msg):
-        """에러 발생 시점의 데이터를 pickle 파일로 저장"""
-        import pickle
-        import datetime
-        
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"crash_worker_{self.worker_id}_game_{game_idx}_{timestamp}.pkl"
-        
-        crash_data = {
-            "worker_id": self.worker_id,
-            "game_idx": game_idx,
-            "error_message": str(error_msg),
-            "pi": pi,  # 문제가 된 확률 벡터
-            "history": self.histories[game_idx],  # 현재까지 둔 수순
-            "step_count": self.step_counts[game_idx],
-            "network_weights_sample": "Need to check trainer/inference server for weights"
-        }
-        
-        with open(filename, "wb") as f:
-            pickle.dump(crash_data, f)
-        
-        print(f"\n🔥 [CRASH SAVED] Worker {self.worker_id} saved crash dump to {filename}")
-        
+
     def run(self):
         while True:
             # --- MCTS Simulation Phase (변경 없음) ---
@@ -245,7 +202,7 @@ class DataWorker:
             for i in range(self.num_parallel_games):
                 if self.sim_counts[i] >= TARGET_SIMS:
                     mcts = self.mcts_envs[i]
-                    temp = 1.0 # if self.step_counts[i] < 30 else 0.1 # 0.1로 하면 10승이 되어서 발산 가능성이 있음
+                    temp = 1.0 if self.step_counts[i] < 30 else 0.1
                     state, pi = mcts.get_action_probs(temp)
                     current_player = mcts.get_current_player()
                     self.histories[i].append([state, pi, current_player])
@@ -261,27 +218,17 @@ class DataWorker:
                         if np.random.rand() < 0.1: # 10% 확률
                             triggered_random = True
                             self.has_played_random[i] = True # "사용함" 처리 (재사용 방지)
-                            
-                    # Action 결정
+                    
                     if triggered_random:
-                        # 랜덤 수 (기존 로직)
+                        # MCTS 정책(pi)에서 둘 수 있는 곳(0보다 큰 곳)만 필터링 -> 기존 돌 제외됨
                         valid_moves = np.where(pi > 0)[0]
                         if len(valid_moves) > 0:
                             action = np.random.choice(valid_moves)
                         else:
-                            action = np.argmax(pi)
-                            
-                    elif self.step_counts[i] < 30:
-                        # 30수 미만: 확률적 선택 (Temperature = 1.0 효과)
-                        try:
-                            action = np.random.choice(len(pi), p=pi)
-                        except ValueError:
-                            # 만약 여기서도 에러나면 안전하게 argmax
-                            action = np.argmax(pi)
+                            action = np.argmax(pi) # 예외 처리
                     else:
-                        # 30수 이상: 가장 많이 방문한 수 선택 (Temperature -> 0 효과)
-                        # temp=0.1을 쓰는 대신 그냥 argmax를 쓰면 수학적으로 동일하고 안전함
-                        action = np.argmax(pi)
+                        # 평소대로 확률 분포에 따라 선택
+                        action = np.random.choice(len(pi), p=pi)
                     
                     self.action_logs[i].append(action)
 
@@ -315,20 +262,19 @@ class DataWorker:
                         
                         # [초기화] 새 게임이 시작되므로 플래그를 False로 리셋
                         self.has_played_random[i] = False
-
-
 # =============================================================================
-# [5] 학습 루프 (Main) - AMP 제거 버전
+# [5] 학습 루프 (Main)
 # =============================================================================
+# [수정 1] ReplayBuffer에 카운터 기능 추가 (이 클래스로 교체하세요)
 @ray.remote
 class ReplayBuffer:
     def __init__(self): 
         self.buffer = deque(maxlen=BUFFER_SIZE)
-        self.total_added = 0 
+        self.total_added = 0  # 누적 카운터
 
     def add(self, history): 
         self.buffer.extend(history)
-        self.total_added += len(history)
+        self.total_added += len(history) # 누적 증가``
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
@@ -338,19 +284,20 @@ class ReplayBuffer:
     def size(self): 
         return len(self.buffer)
     
+    # [핵심] 누적 데이터 개수 반환
     def get_total_added(self):
         return self.total_added
 
 if __name__ == "__main__":
     if not os.path.exists("logs"):
         os.makedirs("logs")
-
+        
     sys.stdout = DualLogger("logs/training.log")
 
     if ray.is_initialized(): ray.shutdown()
     ray.init()
 
-    print(f"🚀 AlphaZero HYBRID Started! (AMP Disabled - Float32 Mode)")
+    print(f"🚀 AlphaZero HYBRID Started!")
 
     inference_server = InferenceServer.remote()
     buffer = ReplayBuffer.remote()
@@ -358,7 +305,8 @@ if __name__ == "__main__":
     model = AlphaZeroNet().to(TRAINER_DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
     
-    # [제거됨] scaler = torch.amp.GradScaler('cuda') 
+    # [AMP 수정 1] GradScaler도 최신 문법으로 변경
+    scaler = torch.amp.GradScaler('cuda')
     
     step = 0
 
@@ -372,7 +320,8 @@ if __name__ == "__main__":
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
-        # [제거됨] scaler 로드 로직 삭제
+        if 'scaler_state_dict' in checkpoint:
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
             
         step = checkpoint['step']
         
@@ -380,22 +329,32 @@ if __name__ == "__main__":
         ray.get(inference_server.update_weights.remote(cpu_weights))
         
         print(f"✅ Resumed successfully from Step {step}")
+        print("⏩ Skipping Synthetic Data Generation (Already trained model).")
 
     # -------------------------------------------------------------
     # [STEP 2] Main Loop
     # -------------------------------------------------------------
     print("🚀 Starting MCTS Workers...")
+    # workers = [DataWorker.remote(buffer, inference_server) for _ in range(NUM_ACTORS)]
+    
     workers = [DataWorker.remote(buffer, inference_server, i) for i in range(NUM_ACTORS)]
 
+    # [추가] 모든 워커가 초기화될 때까지 여기서 딱 대기함 (Block)
     print("⏳ Waiting for all workers to initialize...")
+    
+    # 워커들의 get_seed 함수를 호출해서 결과를 다 받을 때까지 메인 프로세스를 멈춤
+    # 여기서 에러가 나거나 멈춰있으면 CPU 부족임
     seeds = ray.get([w.get_seed.remote() for w in workers])
+    
     print(f"✅ All Workers Ready! Seeds: {seeds}")
+    print(f"👉 Unique seeds count: {len(set(seeds))} / {NUM_ACTORS}") # 이게 10개여야 함
     
     for w in workers: w.run.remote()
     
     print("🚀 Starting Adaptive Main Training Loop...")
     
     last_total_added = ray.get(buffer.get_total_added.remote())
+    last_log_step = step
     
     TARGET_REPLAY_RATIO = 8.0 
     MAX_STEPS_PER_CYCLE = 1000 
@@ -426,32 +385,27 @@ if __name__ == "__main__":
             
             optimizer.zero_grad()
             
-            # [수정] autocast 구문 제거 (Float32 연산)
-            # with torch.amp.autocast('cuda'):  <-- 삭제
-            pred_pi, pred_v = model(s_tensor)
-            loss_pi = -torch.mean(torch.sum(pi_tensor * F.log_softmax(pred_pi, dim=1), dim=1))
-            loss_v = F.mse_loss(pred_v, z_tensor)
-            total_loss = loss_pi + loss_v
+            with torch.amp.autocast('cuda'):
+                pred_pi, pred_v = model(s_tensor)
+                loss_pi = -torch.mean(torch.sum(pi_tensor * pred_pi, dim=1))
+                loss_v = F.mse_loss(pred_v, z_tensor)
+                total_loss = loss_pi + loss_v
             
-            # [수정] Scaler 없이 일반적인 역전파 수행
-            # scaler.scale(total_loss).backward() <-- 삭제
-            total_loss.backward()
-
-            # [수정] Scaler 없이 일반적인 Optimizer Step
-            # scaler.unscale_(optimizer) <-- 삭제
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            # scaler.update() <-- 삭제
+            scaler.scale(total_loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             
             step += 1
 
             if step == 1 or step % 1000 == 0:
                 save_debug_files(step, s_tensor, pi_tensor, z_tensor)
 
+            # [가중치 업데이트]
             if step % 50 == 0:
                 cpu_weights = {k: v.cpu() for k, v in model.state_dict().items()}
                 inference_server.update_weights.remote(cpu_weights)
-                
+
+            # [핵심 수정] 저장 체크를 for문 안에서 매 스텝마다 해야 함!
             if step % SAVE_INTERVAL == 0:
                 if not os.path.exists("models"): os.makedirs("models")
                 
@@ -459,13 +413,12 @@ if __name__ == "__main__":
                     'step': step,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
-                    # 'scaler_state_dict': scaler.state_dict() <-- 삭제
+                    'scaler_state_dict': scaler.state_dict()
                 }
                 save_path = f"models/checkpoint_{step}.pth"
                 torch.save(checkpoint, save_path)
                 print(f"\n💾 Checkpoint Saved: {save_path}")
                 
-                # 그래프 그리기 코드는 동일...
                 plt.figure(figsize=(12, 5))
                 plt.subplot(1, 2, 1)
                 plt.plot(loss_history['step'], loss_history['total'], label='Total')
@@ -476,13 +429,18 @@ if __name__ == "__main__":
                 plt.legend(); plt.grid(True)
                 plt.savefig('training_loss.png')
                 plt.close()
+        # =================================================================
+        # 루프 종료 후 동기화 및 로그 출력
+        # =================================================================
+        last_total_added = current_total_added # 포인터 최신화
 
-        last_total_added = current_total_added 
         current_buffer_size = ray.get(buffer.size.remote())
 
         print(f"[Step {step}] Loss: {total_loss.item():.4f} | "
                 f"New Data: +{new_data_count} / Trained: {steps_to_run} steps | "
-                f"Buf: {current_buffer_size} / ⏱️ Training Cycle Completed in {time.time() - T:.2f}s")
+                f"Buf: {current_buffer_size} / ⏱️ Training Cycle Completed in {time.time() - T:.2f}s / Total Adding {current_total_added}")
+        
+        last_log_step = step
         
         loss_history['step'].append(step)
         loss_history['total'].append(total_loss.item())

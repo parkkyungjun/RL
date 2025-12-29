@@ -7,7 +7,8 @@ cpp_args = ['-std=c++17', '-O3']
 ext_modules = [
     Extension(
         'mcts_core',
-        ['mcts_core.cpp'],
+        # ['mcts_core.cpp'],
+        ['mcts_core_renjurule.cpp'],
         include_dirs=[pybind11.get_include()],
         language='c++',
         extra_compile_args=cpp_args,

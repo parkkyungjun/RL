@@ -5,7 +5,7 @@ import numpy as np
 import sys
 import os
 
-BOARD_SIZE = 8
+BOARD_SIZE = 15
 def save_game_log(worker_id, game_idx, actions, winner, board_size):
     if not os.path.exists("debug_games"):
         os.makedirs("debug_games")

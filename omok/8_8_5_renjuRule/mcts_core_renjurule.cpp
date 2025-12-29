@@ -12,7 +12,7 @@
 
 namespace py = pybind11;
 
-const int BOARD_SIZE = 15;
+const int BOARD_SIZE = 8;
 const int BOARD_AREA = BOARD_SIZE * BOARD_SIZE;
 
 // --- Fast Gomoku Logic ---
