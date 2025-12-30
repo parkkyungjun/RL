@@ -11,10 +11,10 @@ import mcts_core
 # =============================================================================
 # [1] 설정
 # =============================================================================
-BOARD_SIZE = 8
-NUM_RES_BLOCKS = 5      
-NUM_CHANNELS = 64
-MODEL_PATH = "models/checkpoint_4000.pth"  # ✅ 불러올 모델 경로 수정하세요
+BOARD_SIZE = 15
+NUM_RES_BLOCKS = 8
+NUM_CHANNELS = 128
+MODEL_PATH = "models/checkpoint_20500.pth"  # ✅ 불러올 모델 경로 수정하세요
 NUM_MCTS_SIMS = 800  # 생각하는 횟수 (높을수록 잘하지만 느려짐)
 
 # =============================================================================
@@ -23,35 +23,53 @@ NUM_MCTS_SIMS = 800  # 생각하는 횟수 (높을수록 잘하지만 느려짐)
 class ResBlock(nn.Module):
     def __init__(self, channels):
         super().__init__()
+        # [설정 추천] 64채널이면 groups=8 정도가 적당함 (그룹당 8채널)
         self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
-        self.bn1 = nn.BatchNorm2d(channels)
+        self.bn1 = nn.GroupNorm(num_groups=8, num_channels=channels)
+        
         self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(channels)
+        self.bn2 = nn.GroupNorm(num_groups=8, num_channels=channels)
+
     def forward(self, x):
         res = x
         x = F.relu(self.bn1(self.conv1(x)))
         x = self.bn2(self.conv2(x))
         return F.relu(x + res)
-
+    
 class AlphaZeroNet(nn.Module):
     def __init__(self):
         super().__init__()
         self.start_conv = nn.Conv2d(3, NUM_CHANNELS, 3, padding=1)
-        self.bn_start = nn.BatchNorm2d(NUM_CHANNELS)
+        # [수정] bn_start도 GroupNorm으로 교체 (채널 64, 그룹 8)
+        self.bn_start = nn.GroupNorm(num_groups=8, num_channels=NUM_CHANNELS)
+        
         self.backbone = nn.Sequential(*[ResBlock(NUM_CHANNELS) for _ in range(NUM_RES_BLOCKS)])
+        
         self.policy_head = nn.Sequential(
-            nn.Conv2d(NUM_CHANNELS, 2, 1), nn.BatchNorm2d(2), nn.ReLU(),
-            nn.Flatten(), nn.Linear(2 * BOARD_SIZE * BOARD_SIZE, BOARD_SIZE * BOARD_SIZE)
+            nn.Conv2d(NUM_CHANNELS, 2, 1), 
+            # 채널이 2개뿐이므로 그룹은 1개 또는 2개만 가능. 1개 추천(LayerNorm 효과)
+            nn.GroupNorm(num_groups=1, num_channels=2), 
+            nn.ReLU(),
+            nn.Flatten(), 
+            nn.Linear(2 * BOARD_SIZE * BOARD_SIZE, BOARD_SIZE * BOARD_SIZE)
         )
+        
         self.value_head = nn.Sequential(
-            nn.Conv2d(NUM_CHANNELS, 1, 1), nn.BatchNorm2d(1), nn.ReLU(),
-            nn.Flatten(), nn.Linear(BOARD_SIZE * BOARD_SIZE, 64), nn.ReLU(),
-            nn.Linear(64, 1), nn.Tanh()
+            nn.Conv2d(NUM_CHANNELS, 1, 1), 
+            # [버그 수정] 채널이 1개이므로 num_channels=1 이어야 함!
+            nn.GroupNorm(num_groups=1, num_channels=1), 
+            nn.ReLU(),
+            nn.Flatten(), 
+            nn.Linear(BOARD_SIZE * BOARD_SIZE, 64), 
+            nn.ReLU(),
+            nn.Linear(64, 1), 
+            nn.Tanh()
         )
+        
     def forward(self, x):
         x = F.relu(self.bn_start(self.start_conv(x)))
         x = self.backbone(x)
-        policy = F.log_softmax(self.policy_head(x), dim=1)
+        policy = self.policy_head(x)
         value = self.value_head(x)
         return policy, value
 

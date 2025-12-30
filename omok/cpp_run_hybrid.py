@@ -28,7 +28,7 @@ BUFFER_SIZE = 150000
 NUM_ACTORS = 8
 SAVE_INTERVAL = 500
 TARGET_SIMS = 1600
-RESUME_CHECKPOINT = None # "models/checkpoint_5500.pth"  # None 이면 새로 시작
+RESUME_CHECKPOINT = "models/checkpoint_20000.pth"  # None 이면 새로 시작
 NUM_PARALLEL_GAMES = 16
 
 TRAINER_DEVICE = torch.device("cuda:0") 
@@ -264,11 +264,32 @@ class DataWorker:
                             
                     # Action 결정
                     if triggered_random:
-                        # 랜덤 수 (기존 로직)
-                        valid_moves = np.where(pi > 0)[0]
-                        if len(valid_moves) > 0:
-                            action = np.random.choice(valid_moves)
+                        # --- 수정된 로직: Top-K Soft Sampling ---
+                        # pi는 방문 횟수에 기반한 확률이므로, 이미 '수의 질'이 반영되어 있습니다.
+                        # 0보다 큰 확률을 가진 인덱스 추출
+                        valid_indices = np.where(pi > 0)[0]
+                        
+                        if len(valid_indices) > 1:
+                            # 1. 확률 내림차순으로 정렬
+                            sorted_indices = valid_indices[np.argsort(pi[valid_indices])[::-1]]
+                            
+                            # 2. 후보군 선정 (예: 1등은 제외하고, 2등~5등 사이에서 선택)
+                            # 만약 유효한 수가 적다면 가능한 만큼만 슬라이싱
+                            # top_k 범위는 조정 가능 (여기서는 상위 2~5번째 수)
+                            candidates = sorted_indices[1:min(len(sorted_indices), 6)]
+                            
+                            # 3. 후보군 내에서 다시 확률 분포 계산 (Renormalize)
+                            candidate_probs = pi[candidates]
+                            candidate_probs_sum = candidate_probs.sum()
+                            
+                            if candidate_probs_sum > 0:
+                                candidate_probs /= candidate_probs_sum
+                                action = np.random.choice(candidates, p=candidate_probs)
+                            else:
+                                # 후보군 확률 합이 0이면(거의 희박하지만) 그냥 2등 수 선택
+                                action = candidates[0]
                         else:
+                            # 둘 수 있는 곳이 1곳 뿐이라면 선택의 여지가 없음
                             action = np.argmax(pi)
                             
                     elif self.step_counts[i] < 30:
@@ -313,9 +334,10 @@ class DataWorker:
                         self.step_counts[i] = 0
                         self.sim_counts[i] = 0
                         
-                        # [초기화] 새 게임이 시작되므로 플래그를 False로 리셋
-                        self.has_played_random[i] = False
-
+                        if np.random.rand() < 0.5:
+                            self.has_played_random[i] = False 
+                        else:
+                            self.has_played_random[i] = True
 
 # =============================================================================
 # [5] 학습 루프 (Main) - AMP 제거 버전
@@ -439,7 +461,7 @@ if __name__ == "__main__":
 
             # [수정] Scaler 없이 일반적인 Optimizer Step
             # scaler.unscale_(optimizer) <-- 삭제
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             # scaler.update() <-- 삭제
             
