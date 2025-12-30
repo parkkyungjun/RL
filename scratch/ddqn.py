@@ -71,16 +71,16 @@ for epi in tqdm(range(EPISODE)):
             
             with torch.no_grad():
                 value = frozen(next_input)
-            nq = torch.max(value).item() # [수정] .item()으로 값만 추출 (Warning 해결)
+                value2 = model(next_input)
+            
+            nq = value2[torch.argmax(value).item()] # max라고 말한애의 값을 그대로 쓰기 보다 그 가치의 인덱스로 다른 네트워크에서 값을 뽑아쓰면 둘다 동시에 컸을때만 maximization bias가 생기니 더 나은방법으로 평가됨
             r = -1
             target = r*0.1 + nq*0.9
         else:
-            target = -10
+            target = torch.tensor(-10, dtype=torch.float32, device=device)
         
         if [ny+1, nx+1] == TABLE_SIZE:
-            target = 10
-        # Target 계산
-        target = torch.tensor(target, dtype=torch.float32, device=device)
+            target = torch.tensor(10, dtype=torch.float32, device=device)
         
         optimizer.zero_grad()
         loss = F.mse_loss(q, target)
