@@ -14,6 +14,7 @@ import sys
 # C++ 모듈 (필요시 주석 처리하고 테스트 가능, 여기선 MCTS Worker에서 사용)
 import mcts_core 
 from logging_ import *
+import collections
 
 # =============================================================================
 # [1] 설정
@@ -28,12 +29,13 @@ BUFFER_SIZE = 150000
 NUM_ACTORS = 8
 SAVE_INTERVAL = 500
 TARGET_SIMS = 1600
-RESUME_CHECKPOINT = "models/checkpoint_20000.pth"  # None 이면 새로 시작
+RESUME_CHECKPOINT = "models/checkpoint_20000__.pth"  # None 이면 새로 시작
 NUM_PARALLEL_GAMES = 16
 
 TRAINER_DEVICE = torch.device("cuda:0") 
 INFERENCE_DEVICE = torch.device("cuda:0") 
 
+BLACK_PLAYER_ID = 1
 # =============================================================================
 # [2] 신경망 (기존 동일)
 # =============================================================================
@@ -163,6 +165,7 @@ class DataWorker:
         self.buffer_ref = buffer_ref
         self.inference_server = inference_server
         self.num_parallel_games = NUM_PARALLEL_GAMES
+        
         self.mcts_envs = [mcts_core.MCTS() for _ in range(self.num_parallel_games)]
         self.histories = [[] for _ in range(self.num_parallel_games)]
         self.sim_counts = [0] * self.num_parallel_games
@@ -171,15 +174,17 @@ class DataWorker:
         self.action_logs = [[] for _ in range(self.num_parallel_games)]
         self.game_counters = [0] * self.num_parallel_games
         
-        # [변경] 이 게임에서 랜덤 수를 이미 뒀는지 체크하는 플래그
-        self.has_played_random = [
-            False if np.random.rand() < 0.5 else True 
-            for _ in range(self.num_parallel_games)
-        ]
+        # [변경] 랜덤 초기화 플래그 제거 -> 매 게임마다 False로 시작
+        self.has_played_penalty = [False] * self.num_parallel_games
 
+        # [신규] 최근 100판의 흑 승리 여부 기록 (승률 계산용)
+        # 1: 흑 승리, 0: 백 승리 또는 무승부
+        self.win_history = collections.deque(maxlen=1000) 
+        self.is_contaminated = [False] * self.num_parallel_games
+        
         for mcts in self.mcts_envs:
             mcts.reset()
-            mcts.add_root_noise(0.3, 0.25)
+            # mcts.add_root_noise(0.3, 0.25)
 
     def get_seed(self):
         return np.random.get_state()[1][0]
@@ -197,32 +202,15 @@ class DataWorker:
                 extend_data.append([equi_state_flip, equi_pi_flip.flatten(), z])
         return extend_data
     
-    def save_crash_dump(self, game_idx, pi, error_msg):
-        """에러 발생 시점의 데이터를 pickle 파일로 저장"""
-        import pickle
-        import datetime
-        
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"crash_worker_{self.worker_id}_game_{game_idx}_{timestamp}.pkl"
-        
-        crash_data = {
-            "worker_id": self.worker_id,
-            "game_idx": game_idx,
-            "error_message": str(error_msg),
-            "pi": pi,  # 문제가 된 확률 벡터
-            "history": self.histories[game_idx],  # 현재까지 둔 수순
-            "step_count": self.step_counts[game_idx],
-            "network_weights_sample": "Need to check trainer/inference server for weights"
-        }
-        
-        with open(filename, "wb") as f:
-            pickle.dump(crash_data, f)
-        
-        print(f"\n🔥 [CRASH SAVED] Worker {self.worker_id} saved crash dump to {filename}")
-        
+    def calculate_black_win_rate(self):
+        """최근 전적을 바탕으로 흑 승률 계산"""
+        if len(self.win_history) < 10: # 데이터가 너무 적으면 판단 보류 (0.0 리턴)
+            return 0.0
+        return sum(self.win_history) / len(self.win_history)
+
     def run(self):
         while True:
-            # --- MCTS Simulation Phase (변경 없음) ---
+            # --- MCTS Simulation Phase ---
             states_to_infer = []
             indices_to_infer = []
             for i in range(self.num_parallel_games):
@@ -245,63 +233,53 @@ class DataWorker:
             for i in range(self.num_parallel_games):
                 if self.sim_counts[i] >= TARGET_SIMS:
                     mcts = self.mcts_envs[i]
-                    temp = 1.0 # if self.step_counts[i] < 30 else 0.1 # 0.1로 하면 10승이 되어서 발산 가능성이 있음
-                    state, pi = mcts.get_action_probs(temp)
+                    
+                    # [중요] 1등, 2등 수를 정확히 파악하기 위해 temp=1.0으로 원본 분포를 가져옵니다.
+                    state, pi = mcts.get_action_probs(1.0)
+                    
                     current_player = mcts.get_current_player()
                     self.histories[i].append([state, pi, current_player])
                     
-                    # [핵심 변경 로직]
-                    # 1. 흑 차례인가? (보통 0부터 시작하므로 짝수 턴이 흑)
-                    # 2. 이 게임에서 아직 랜덤 수를 안 뒀는가?
-                    # 3. 10% 확률에 당첨되었는가?
-                    is_black_turn = (self.step_counts[i] % 2 == 0)
-                    triggered_random = False 
+                    # --- [로직 변경] 흑 승률 과다 시 견제 로직 ---
+                    # 1. 흑 차례인가? (짝수 턴)
+                    # 2. 이 게임에서 아직 패널티 수를 안 뒀는가?
+                    # 3. 현재 워커의 흑 승률이 80% 이상인가?
+                    # 4. 10% 확률에 당첨되었는가?
                     
-                    if is_black_turn and not self.has_played_random[i]:
-                        if np.random.rand() < 0.1: # 10% 확률
-                            triggered_random = True
-                            self.has_played_random[i] = True # "사용함" 처리 (재사용 방지)
-                            
+                    is_black_turn = (self.step_counts[i] % 2 == 0)
+                    black_win_rate = self.calculate_black_win_rate()
+                    force_second_best = False
+                    
+                    if is_black_turn and not self.has_played_penalty[i]:
+                        if black_win_rate >= 1.5:  # 승률 80% 이상일 때만 발동
+                            if np.random.rand() < 0.1:  # 한 수마다 10% 확률로 체크
+                                force_second_best = True
+                                self.has_played_penalty[i] = True # 이번 게임에서 사용 처리
+
                     # Action 결정
-                    if triggered_random:
-                        # --- 수정된 로직: Top-K Soft Sampling ---
-                        # pi는 방문 횟수에 기반한 확률이므로, 이미 '수의 질'이 반영되어 있습니다.
-                        # 0보다 큰 확률을 가진 인덱스 추출
+                    if force_second_best:
+                        # --- 무조건 2번째로 좋은 수 선택 ---
                         valid_indices = np.where(pi > 0)[0]
+                        # 방문 횟수(확률) 내림차순 정렬 (큰 것 -> 작은 것)
+                        sorted_indices = valid_indices[np.argsort(pi[valid_indices])[::-1]]
                         
-                        if len(valid_indices) > 1:
-                            # 1. 확률 내림차순으로 정렬
-                            sorted_indices = valid_indices[np.argsort(pi[valid_indices])[::-1]]
-                            
-                            # 2. 후보군 선정 (예: 1등은 제외하고, 2등~5등 사이에서 선택)
-                            # 만약 유효한 수가 적다면 가능한 만큼만 슬라이싱
-                            # top_k 범위는 조정 가능 (여기서는 상위 2~5번째 수)
-                            candidates = sorted_indices[1:min(len(sorted_indices), 6)]
-                            
-                            # 3. 후보군 내에서 다시 확률 분포 계산 (Renormalize)
-                            candidate_probs = pi[candidates]
-                            candidate_probs_sum = candidate_probs.sum()
-                            
-                            if candidate_probs_sum > 0:
-                                candidate_probs /= candidate_probs_sum
-                                action = np.random.choice(candidates, p=candidate_probs)
-                            else:
-                                # 후보군 확률 합이 0이면(거의 희박하지만) 그냥 2등 수 선택
-                                action = candidates[0]
+                        if len(sorted_indices) >= 2:
+                            action = sorted_indices[1] # 2등 수 선택
+                            # print(f"Worker {self.worker_id}: Black win rate {black_win_rate:.2f} >= 0.8 -> Force 2nd best move.")
                         else:
-                            # 둘 수 있는 곳이 1곳 뿐이라면 선택의 여지가 없음
-                            action = np.argmax(pi)
-                            
-                    elif self.step_counts[i] < 30:
-                        # 30수 미만: 확률적 선택 (Temperature = 1.0 효과)
+                            action = sorted_indices[0] # 어쩔 수 없이 1등
+                        self.is_contaminated[i] = True
+                        
+                    # else:
+                    #     action = np.random.choice(len(pi), p=pi)
+                    elif self.step_counts[i] < 10:
+                        # 30수 미만: 확률적 선택 (탐색 유지)
                         try:
                             action = np.random.choice(len(pi), p=pi)
                         except ValueError:
-                            # 만약 여기서도 에러나면 안전하게 argmax
                             action = np.argmax(pi)
                     else:
-                        # 30수 이상: 가장 많이 방문한 수 선택 (Temperature -> 0 효과)
-                        # temp=0.1을 쓰는 대신 그냥 argmax를 쓰면 수학적으로 동일하고 안전함
+                        # 30수 이상: 가장 좋은 수 선택 (Greedy)
                         action = np.argmax(pi)
                     
                     self.action_logs[i].append(action)
@@ -309,7 +287,7 @@ class DataWorker:
                     mcts.update_root_game(action)
                     self.step_counts[i] += 1
                     self.sim_counts[i] = 0
-                    mcts.add_root_noise(0.3, 0.25)
+                    # mcts.add_root_noise(0.3, 0.25)
                     
                     is_game_over, winner = mcts.check_game_status()
                     
@@ -317,28 +295,33 @@ class DataWorker:
                         save_game_log(self.worker_id, self.game_counters[i], self.action_logs[i], winner, BOARD_SIZE)
                         self.game_counters[i] += 1
 
-                        processed_history = []
-                        for h_state, h_pi, h_player in self.histories[i]:
-                            if winner == 0: z = 0.0
-                            elif h_player == winner: z = 1.0
-                            else: z = -1.0
-                            processed_history.append([h_state, h_pi, z])
-                        
-                        augmented = self.get_equi_data(processed_history)
-                        self.buffer_ref.add.remote(augmented)
+                        # --- [신규] 승률 계산을 위한 승패 기록 ---
+                        # winner가 BLACK_PLAYER_ID(보통 0)와 같으면 흑 승리
+                        if winner == BLACK_PLAYER_ID:
+                            self.win_history.append(1)
+                        else:
+                            # 백 승리 혹은 무승부
+                            self.win_history.append(0)
+
+                        if not self.is_contaminated[i]:
+                            processed_history = []
+                            for h_state, h_pi, h_player in self.histories[i]:
+                                if winner == 0: z = 0.0 # 무승부라 가정 (winner 정의에 따라 수정 필요)
+                                elif h_player == winner: z = 1.0
+                                else: z = -1.0
+                                processed_history.append([h_state, h_pi, z])
+                            
+                            augmented = self.get_equi_data(processed_history)
+                            self.buffer_ref.add.remote(augmented)
                         
                         mcts.reset()
-                        mcts.add_root_noise(0.3, 0.25)
+                        # mcts.add_root_noise(0.3, 0.25)
                         self.histories[i] = []
                         self.action_logs[i] = []
                         self.step_counts[i] = 0
                         self.sim_counts[i] = 0
-                        
-                        if np.random.rand() < 0.5:
-                            self.has_played_random[i] = False 
-                        else:
-                            self.has_played_random[i] = True
-
+                        self.has_played_penalty[i] = False # 새 게임 플래그 리셋
+                        self.is_contaminated[i] = False
 # =============================================================================
 # [5] 학습 루프 (Main) - AMP 제거 버전
 # =============================================================================
