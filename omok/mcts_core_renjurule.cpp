@@ -363,7 +363,12 @@ public:
             // 이동 후 승패 체크
             auto result = scratch_game.check_win(current_node->action);
             if (result.first) {
-                float val = (result.second == 0) ? 0.0f : -1.0f;
+                
+                float val = 0.0f;
+                if (result.second != 0) {
+                    val = (result.second == scratch_game.current_player) ? 1.0f : -1.0f;
+                }
+                
                 backpropagate_value(val);
                 return py::none();
             }
