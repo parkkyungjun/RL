@@ -15,7 +15,7 @@ import mcts_core
 BOARD_SIZE = 15
 NUM_RES_BLOCKS = 8      
 NUM_CHANNELS = 128
-MODEL_PATH = "models/checkpoint_20500.pth" # ✅ 관전하고 싶은 모델 경로
+MODEL_PATH = "models/checkpoint_55000.pth" # ✅ 관전하고 싶은 모델 경로
 NUM_MCTS_SIMS = 1600     # 생각하는 횟수
 WATCH_DELAY = 1.0       # 한 수 둘 때마다 1초씩 멈춤 (관전용)
 TEMPERATURE = 0       # 0.0: 정수(Best)만 둠 / 1.0: 약간 다양하게 둠 (관전 꿀잼용)
@@ -148,7 +148,8 @@ def main():
             with torch.no_grad():
                 pi_logits, value = model(state_tensor)
             
-            probs = torch.exp(pi_logits).cpu().numpy().flatten()
+            # probs = torch.exp(pi_logits).cpu().numpy().flatten()
+            probs = F.softmax(pi_logits, dim=1).cpu().numpy().flatten()
             val = value.item()
             mcts.backpropagate(probs, val)
 

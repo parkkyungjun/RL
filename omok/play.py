@@ -198,7 +198,8 @@ def main():
                 with torch.no_grad():
                     pi_logits, value = model(state_tensor)
                 
-                probs = torch.exp(pi_logits).cpu().numpy().flatten()
+                # probs = torch.exp(pi_logits).cpu().numpy().flatten()
+                probs = F.softmax(pi_logits, dim=1).cpu().numpy().flatten()
                 val = value.item()
                 
                 mcts.backpropagate(probs, val)
