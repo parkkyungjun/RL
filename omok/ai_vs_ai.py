@@ -15,7 +15,7 @@ import mcts_core
 BOARD_SIZE = 15
 NUM_RES_BLOCKS = 8      
 NUM_CHANNELS = 128
-MODEL_PATH = "models/checkpoint_55000.pth" # ✅ 관전하고 싶은 모델 경로
+MODEL_PATH = "models/checkpoint_30000_bug.pth" # ✅ 관전하고 싶은 모델 경로
 NUM_MCTS_SIMS = 1600     # 생각하는 횟수
 WATCH_DELAY = 1.0       # 한 수 둘 때마다 1초씩 멈춤 (관전용)
 TEMPERATURE = 0       # 0.0: 정수(Best)만 둠 / 1.0: 약간 다양하게 둠 (관전 꿀잼용)
@@ -130,7 +130,7 @@ def main():
     
     print_board(local_board)
     time.sleep(1) # 시작 전 대기
-
+    step = 0
     while True:
         player_name = "흑(Black)" if turn == 1 else "백(White)"
         print(f"[{move_count}수] {player_name} 생각 중...", end="", flush=True)
@@ -138,7 +138,7 @@ def main():
         # 1. AI 생각 (MCTS 시뮬레이션)
         # 관전용이므로 노이즈는 꺼도 되지만, 
         # 다양한 수를 보고 싶으면 add_root_noise(0.3, 0.25) 정도 줘도 됨
-        mcts.add_root_noise(0.0, 0.0) 
+        # mcts.add_root_noise(0.0, 0.0) 
         
         for i in range(NUM_MCTS_SIMS):
             leaf_state = mcts.select_leaf()
@@ -148,30 +148,38 @@ def main():
             with torch.no_grad():
                 pi_logits, value = model(state_tensor)
             
-            # probs = torch.exp(pi_logits).cpu().numpy().flatten()
             probs = F.softmax(pi_logits, dim=1).cpu().numpy().flatten()
             val = value.item()
             mcts.backpropagate(probs, val)
 
         print(" 결정!")
+        _, root_probs = mcts.get_action_probs(1.0) 
+        # if step > 0:
+        #     break
+        # step += 1
+        # 확률이 높은 순서대로 정렬 (내림차순)
+        # argsort는 오름차순이므로 [::-1]로 뒤집습니다.
+        top_indices = np.argsort(root_probs)[::-1][:3] 
 
+        print(f"📊 [AI 생각 Top 3]")
+        
+        for rank, idx in enumerate(top_indices):
+            prob = root_probs[idx]
+            if prob <= 0: continue # 확률 0이면 출력 안 함
+
+            r, c = idx // BOARD_SIZE, idx % BOARD_SIZE
+            # 전체 시뮬레이션 횟수 * 확률 = 대략적인 방문 횟수
+            est_visits = int(prob * NUM_MCTS_SIMS) 
+            
+            print(f"   {rank+1}위: ({r}, {c}) \t확률: {prob*100:5.1f}% \t(방문: 약 {est_visits}회)")
+        print("-" * 30)
+        
         # 2. 착수 선택
         # TEMPERATURE가 0이면 가장 승률 높은 수, 높으면 확률적으로 둠
         temp = 0
         _, pi = mcts.get_action_probs(TEMPERATURE) 
         
-        if np.isnan(pi).any():
-            print("⚠️ NaN detected in policy, falling back to argmax")
-            action = np.argmax(pi) # NaN 무시하고 인덱스 반환 시도 (또는 랜덤)
-            # 만약 argmax도 실패하면 그냥 랜덤
-            if np.isnan(pi[action]): 
-                action = np.random.choice(len(pi))
-        else:
-            # 확률 기반 선택
-            action = np.random.choice(len(pi), p=pi)
-            
-        # 확률 기반 선택
-        # action = np.random.choice(len(pi), p=pi)
+        action = np.random.choice(len(pi), p=pi)
         
         # 3. 보드 업데이트 및 출력
         r, c = action // BOARD_SIZE, action % BOARD_SIZE

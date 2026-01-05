@@ -185,7 +185,7 @@ def main():
             
             # 시뮬레이션 수행
             # (학습 때 Worker 코드와 동일한 로직을 단일 스레드로 수행)
-            mcts.add_root_noise(0.0, 0.0) # 실전에서는 노이즈 끔
+            # mcts.add_root_noise(0.0, 0.0) # 실전에서는 노이즈 끔
             
             for i in range(NUM_MCTS_SIMS):
                 leaf_state = mcts.select_leaf()
