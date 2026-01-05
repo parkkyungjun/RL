@@ -7,3 +7,4 @@ gymnasium==1.2.2
 tqdm
 pybind11
 ray[default]
+gymnasium[mujoco]
