@@ -7,13 +7,13 @@ import os
 import mcts_core  # C++ 모듈
 
 # =============================================================================
-# [1] 설정 및 모델 클래스 (기존 코드와 동일)
+# [1] 설정 및 모델 클래스
 # =============================================================================
 BOARD_SIZE = 15
 NUM_RES_BLOCKS = 8
 NUM_CHANNELS = 128
-MODEL_PATH = "models/checkpoint_100000.pth"  # 경로 확인 필요
-NUM_MCTS_SIMS = 400  # 웹 반응 속도를 위해 400~800회 추천 (1600은 조금 느릴 수 있음)
+MODEL_PATH = "models/checkpoint_190000.pth"
+NUM_MCTS_SIMS = 800  # 반응 속도를 고려하여 조정
 
 class ResBlock(nn.Module):
     def __init__(self, channels):
@@ -60,9 +60,6 @@ class AlphaZeroNet(nn.Module):
         value = self.value_head(x)
         return policy, value
 
-# =============================================================================
-# [2] 리소스 캐싱 (모델 로딩 최적화)
-# =============================================================================
 @st.cache_resource
 def load_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -82,86 +79,133 @@ def load_model():
 model, device = load_model()
 
 # =============================================================================
-# [3] 게임 로직 및 UI
+# [2] 게임 로직 및 UI 설정
 # =============================================================================
 st.set_page_config(page_title="AlphaZero Omok", layout="centered")
 
-# CSS 스타일링: 버튼을 정사각형으로 만들고 간격을 좁힘
 st.markdown("""
     <style>
     div.stButton > button {
-        width: 38px;
-        height: 38px;
-        padding: 0px;
-        font-size: 20px;
-        border-radius: 5px;
-        margin: 0px;
+        width: 38px; height: 38px; padding: 0px;
+        font-size: 20px; border-radius: 5px; margin: 0px;
     }
-    /* 버튼 간격 최소화 */
     div[data-testid="column"] {
-        width: auto !important;
-        flex: 0 0 auto !important;
-        min-width: 0 !important;
-        padding: 1px !important;
+        width: auto !important; flex: 0 0 auto !important;
+        min-width: 0 !important; padding: 1px !important;
     }
     </style>
 """, unsafe_allow_html=True)
 
 st.title("⚪ AlphaZero Omok AI ⚫")
 
+# --- 무르기(Undo) 함수 구현 ---
+def undo_last_move():
+    """
+    가장 최근의 수순(Human + AI)을 취소하고 상태를 재구축합니다.
+    """
+    # 기록이 없으면 무시
+    if not st.session_state.history:
+        return
+
+    # 보통 '나의 실수'를 되돌리려면 [내 수 + AI 수] 2개를 빼야 내 차례가 됩니다.
+    # 하지만 게임이 끝났거나, AI가 두기 전 등 상황에 따라 1개만 뺄 수도 있습니다.
+    # 여기서는 간단하게: "현재 턴이 사람 턴이면 2개(AI, 나) 삭제", "AI 턴이면(혹은 종료시) 로직에 맞게 삭제"
+    
+    # 전략: History에서 2개를 pop하고, 처음부터 다시 둔다.
+    # (AI가 선공이라 History 길이가 1인 경우 등 예외 처리 필요)
+    
+    to_pop = 2
+    if len(st.session_state.history) < 2:
+        to_pop = len(st.session_state.history)
+        # 만약 AI가 선공이라 처음에 1개(AI)만 있는데 무르기를 하면? -> 그냥 초기화와 같음
+    
+    # 1. 기록 삭제
+    for _ in range(to_pop):
+        if st.session_state.history:
+            st.session_state.history.pop()
+            
+    # 2. 보드 및 MCTS 완전 초기화
+    st.session_state.board = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=int)
+    st.session_state.game_over = False
+    st.session_state.winner = None
+    st.session_state.last_move = None
+    st.session_state.mcts.reset() # C++ MCTS 객체 리셋
+    
+    # 3. 턴 초기화 (흑부터 시작)
+    st.session_state.turn = 1 
+    
+    # 4. History 재실행 (Replay)
+    for idx in st.session_state.history:
+        r, c = idx // BOARD_SIZE, idx % BOARD_SIZE
+        
+        # 보드에 착수
+        st.session_state.board[r][c] = st.session_state.turn
+        
+        # MCTS 트리에 착수 반영
+        st.session_state.mcts.update_root_game(idx)
+        
+        # 마지막 수 갱신
+        st.session_state.last_move = (r, c)
+        
+        # 턴 넘기기
+        st.session_state.turn *= -1
+        
+    st.success("⏪ 무르기 완료!")
+
 # --- 사이드바 설정 ---
 with st.sidebar:
     st.header("게임 설정")
     
-    # 선공/후공 선택
     user_color_choice = st.radio("당신의 돌을 선택하세요:", ("흑 (선공)", "백 (후공)"))
     human_color = 1 if "흑" in user_color_choice else -1
     
-    # 난이도(시뮬레이션 횟수) 조절
     sims = st.slider("AI 생각 깊이 (Simulations)", 100, 2000, 400, step=100)
     
-    if st.button("🔄 새 게임 시작", type="primary"):
-        # 세션 초기화
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.rerun()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔄 재시작", type="primary"):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
+    with col2:
+        # 무르기 버튼 추가
+        if st.button("⏪ 무르기"):
+            undo_last_move()
+            st.rerun()
 
-# --- 게임 상태 초기화 (Session State) ---
+# --- 상태 초기화 ---
 if 'board' not in st.session_state:
     st.session_state.board = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=int)
-    st.session_state.turn = 1  # 1: 흑, -1: 백
+    st.session_state.turn = 1
     st.session_state.game_over = False
     st.session_state.winner = None
     st.session_state.last_move = None
+    st.session_state.history = [] # [NEW] 착수 기록 저장용 리스트
     
-    # MCTS 초기화
     mcts = mcts_core.MCTS()
     mcts.reset()
-    st.session_state.mcts = mcts # MCTS 객체를 세션에 저장
+    st.session_state.mcts = mcts
 
-    # 만약 AI가 선공(흑)이라면 첫 수(7,7) 강제 착수
-    if human_color == -1: # 인간이 백이면, AI는 흑
+    # AI 선공(흑) 처리
+    if human_color == -1:
         center = 7 * BOARD_SIZE + 7
         st.session_state.mcts.update_root_game(center)
         st.session_state.board[7][7] = 1
         st.session_state.turn = -1
         st.session_state.last_move = (7, 7)
+        st.session_state.history.append(center) # [NEW] 기록 추가
 
-# --- 헬퍼 함수: AI 착수 로직 ---
+# --- AI 착수 로직 ---
 def run_ai_turn():
     if st.session_state.game_over:
         return
 
     mcts = st.session_state.mcts
-    
-    # 진행바 표시
     progress_bar = st.progress(0, text="AI가 생각 중입니다...")
     
-    # MCTS 시뮬레이션
     for i in range(sims):
         leaf_state = mcts.select_leaf()
-        if leaf_state is None:
-            continue
+        if leaf_state is None: continue
             
         state_tensor = torch.tensor(leaf_state, dtype=torch.float32).unsqueeze(0).to(device)
         with torch.no_grad():
@@ -171,49 +215,39 @@ def run_ai_turn():
         val = value.item()
         mcts.backpropagate(probs, val)
         
-        # 진행바 업데이트 (너무 자주하면 느려지므로 10%마다)
         if i % (sims // 10) == 0:
             progress_bar.progress((i + 1) / sims, text=f"AI 생각 중... ({i}/{sims})")
             
-    progress_bar.empty() # 진행바 제거
+    progress_bar.empty()
 
-    # 행동 선택 (Greedy)
     _, pi = mcts.get_action_probs(0.0)
     ai_action = int(np.argmax(pi))
-    
     r, c = ai_action // BOARD_SIZE, ai_action % BOARD_SIZE
     
     # 상태 업데이트
     st.session_state.mcts.update_root_game(ai_action)
     st.session_state.board[r][c] = st.session_state.turn
     st.session_state.last_move = (r, c)
+    st.session_state.history.append(ai_action) # [NEW] 기록 추가
     
-    # 승패 체크
     is_over, winner = st.session_state.mcts.check_game_status()
     if is_over:
         st.session_state.game_over = True
         st.session_state.winner = winner
     else:
-        st.session_state.turn *= -1 # 턴 변경
-        st.rerun() # 화면 갱신하여 턴 넘김
+        st.session_state.turn *= -1
+        st.rerun()
 
 # --- 메인 보드 UI ---
 st.write(f"현재 차례: **{'흑 (⚫)' if st.session_state.turn == 1 else '백 (⚪)'}**")
 
-# 게임 종료 메시지
 if st.session_state.game_over:
     winner_text = "흑 (⚫)" if st.session_state.winner == 1 else "백 (⚪)"
-    if st.session_state.winner == 0: # 무승부
+    if st.session_state.winner == 0:
         st.info("🏁 무승부입니다!")
     else:
-        if st.session_state.winner == human_color:
-            st.success(f"🎉 승리! {winner_text}이 이겼습니다.")
-        else:
-            st.error(f"💀 패배... {winner_text}이 이겼습니다.")
-
-# 보드 그리기 (15x15)
-# columns 간격을 최소화하기 위해 gap="small" 사용 불가 (columns 자체가 좁아야 함)
-# 하지만 st.columns는 반응형이라 완벽한 정사각은 CSS로 제어함
+        msg = "승리! 🎉" if st.session_state.winner == human_color else "패배... 💀"
+        st.success(f"{msg} {winner_text} 승.")
 
 for r in range(BOARD_SIZE):
     cols = st.columns(BOARD_SIZE)
@@ -221,27 +255,23 @@ for r in range(BOARD_SIZE):
         idx = r * BOARD_SIZE + c
         val = st.session_state.board[r][c]
         
-        # 버튼 라벨 결정
         label = " "
         if val == 1: label = "⚫"
         elif val == -1: label = "⚪"
         
-        # 마지막 둔 수 강조 (빨간 테두리 느낌은 텍스트로 대체 or CSS)
         if st.session_state.last_move == (r, c):
-            label = "🔴" if val == 1 else "⭕" # 강조 표시
+            label = "🔴" if val == 1 else "⭕"
 
-        # 버튼 생성 (키는 유니크해야 함)
-        # 게임이 끝났거나 AI 턴이면 버튼 비활성화 (disabled=True)
         is_disabled = st.session_state.game_over or (st.session_state.turn != human_color)
         
         if cols[c].button(label, key=f"btn_{r}_{c}", disabled=is_disabled):
-            if val == 0: # 빈 칸일 때만
-                # 1. 사람 착수 처리
+            if val == 0:
+                # [사람 착수]
                 st.session_state.board[r][c] = st.session_state.turn
                 st.session_state.mcts.update_root_game(idx)
                 st.session_state.last_move = (r, c)
+                st.session_state.history.append(idx) # [NEW] 기록 추가
                 
-                # 승패 체크
                 is_over, winner = st.session_state.mcts.check_game_status()
                 if is_over:
                     st.session_state.game_over = True
@@ -251,7 +281,5 @@ for r in range(BOARD_SIZE):
                     st.session_state.turn *= -1
                     st.rerun()
 
-# --- AI 턴 자동 실행 ---
-# 화면이 다시 그려진 후, 현재 턴이 AI라면 로직 실행
 if not st.session_state.game_over and st.session_state.turn != human_color:
     run_ai_turn()
