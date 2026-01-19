@@ -29,7 +29,7 @@ BUFFER_SIZE = 150000
 NUM_ACTORS = 8
 SAVE_INTERVAL = 500
 TARGET_SIMS = 1600
-RESUME_CHECKPOINT = "models/checkpoint_20000__.pth"  # None 이면 새로 시작
+RESUME_CHECKPOINT = "models/checkpoint_18000.pth"  # None 이면 새로 시작
 NUM_PARALLEL_GAMES = 16
 
 TRAINER_DEVICE = torch.device("cuda:0") 
@@ -152,6 +152,7 @@ class InferenceServer:
 # =============================================================================
 # [4] Data Worker (MCTS - 기존과 동일)
 # =============================================================================
+
 @ray.remote(num_cpus=1)
 class DataWorker:
     def __init__(self, buffer_ref, inference_server, worker_id):
@@ -183,7 +184,7 @@ class DataWorker:
         
         for mcts in self.mcts_envs:
             mcts.reset()
-            # mcts.add_root_noise(0.3, 0.25)
+            mcts.add_root_noise(0.3, 0.25)
 
     def get_seed(self):
         return np.random.get_state()[1][0]
@@ -268,27 +269,24 @@ class DataWorker:
                         else:
                             action = sorted_indices[0] # 어쩔 수 없이 1등
                         self.is_contaminated[i] = True
-                        
+                    elif self.step_counts[i] < 10:
+                        # 30수 미만: 확률적 선택 (탐색 유지)
+                        try:
+                            action = np.random.choice(len(pi), p=pi)
+                        except ValueError:
+                            action = np.argmax(pi)
+                    else:
+                        # 30수 이상: 가장 좋은 수 선택 (Greedy)
+                        action = np.argmax(pi)
                     # else:
                     #     action = np.random.choice(len(pi), p=pi)
-                    # elif self.step_counts[i] < 10:
-                    #     # 30수 미만: 확률적 선택 (탐색 유지)
-                    #     try:
-                    #         action = np.random.choice(len(pi), p=pi)
-                    #     except ValueError:
-                    #         action = np.argmax(pi)
-                    # else:
-                    #     # 30수 이상: 가장 좋은 수 선택 (Greedy)
-                    #     action = np.argmax(pi)
-                    else:
-                        action = np.random.choice(len(pi), p=pi)
                     
                     self.action_logs[i].append(action)
 
                     mcts.update_root_game(action)
                     self.step_counts[i] += 1
                     self.sim_counts[i] = 0
-                    # mcts.add_root_noise(0.3, 0.25)
+                    mcts.add_root_noise(0.3, 0.25)
                     
                     is_game_over, winner = mcts.check_game_status()
                     
@@ -316,13 +314,14 @@ class DataWorker:
                             self.buffer_ref.add.remote(augmented)
                         
                         mcts.reset()
-                        # mcts.add_root_noise(0.3, 0.25)
+                        mcts.add_root_noise(0.3, 0.25)
                         self.histories[i] = []
                         self.action_logs[i] = []
                         self.step_counts[i] = 0
                         self.sim_counts[i] = 0
                         self.has_played_penalty[i] = False # 새 게임 플래그 리셋
                         self.is_contaminated[i] = False
+
 # =============================================================================
 # [5] 학습 루프 (Main) - AMP 제거 버전
 # =============================================================================
@@ -445,7 +444,7 @@ if __name__ == "__main__":
 
             # [수정] Scaler 없이 일반적인 Optimizer Step
             # scaler.unscale_(optimizer) <-- 삭제
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             # scaler.update() <-- 삭제
             
