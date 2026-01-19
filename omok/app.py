@@ -9,11 +9,12 @@ import mcts_core  # C++ 모듈
 # =============================================================================
 # [1] 설정 및 모델 클래스
 # =============================================================================
+# streamlit run app.py
 BOARD_SIZE = 15
 NUM_RES_BLOCKS = 8
 NUM_CHANNELS = 128
-MODEL_PATH = "models/checkpoint_190000.pth"
-NUM_MCTS_SIMS = 800  # 반응 속도를 고려하여 조정
+MODEL_PATH = "models/checkpoint_340000.pth"
+NUM_MCTS_SIMS = 1600  # 반응 속도를 고려하여 조정
 
 class ResBlock(nn.Module):
     def __init__(self, channels):
@@ -159,7 +160,7 @@ with st.sidebar:
     user_color_choice = st.radio("당신의 돌을 선택하세요:", ("흑 (선공)", "백 (후공)"))
     human_color = 1 if "흑" in user_color_choice else -1
     
-    sims = st.slider("AI 생각 깊이 (Simulations)", 100, 2000, 400, step=100)
+    sims = st.slider("AI 생각 깊이 (Simulations)", 100, 2000, NUM_MCTS_SIMS, step=100)
     
     col1, col2 = st.columns(2)
     with col1:

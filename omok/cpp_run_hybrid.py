@@ -29,7 +29,7 @@ BUFFER_SIZE = 150000
 NUM_ACTORS = 8
 SAVE_INTERVAL = 500
 TARGET_SIMS = 1600
-RESUME_CHECKPOINT = "models/checkpoint_20000__.pth"  # None 이면 새로 시작
+RESUME_CHECKPOINT = "models/checkpoint_18000.pth"  # None 이면 새로 시작
 NUM_PARALLEL_GAMES = 16
 
 TRAINER_DEVICE = torch.device("cuda:0") 
@@ -444,7 +444,7 @@ if __name__ == "__main__":
 
             # [수정] Scaler 없이 일반적인 Optimizer Step
             # scaler.unscale_(optimizer) <-- 삭제
-            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             # scaler.update() <-- 삭제
             
